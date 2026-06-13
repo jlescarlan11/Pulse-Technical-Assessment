@@ -204,16 +204,31 @@ body {
    (.pulse-dot / .pulse-me / .pulse-me-label kept intact)
    ============================================================ */
 
-/* Live peer dots: a luminous core with an expanding sonar ring */
+/* Live peer dots. The class hook is now an invisible >=44px hit target so a
+   tap/click anywhere near a soul connects, even when dots cluster. The rendered
+   ~15px signal — luminous core + expanding sonar ring — is drawn on the inner
+   .pulse-dot-core, leaving the visual identical while the touch area grows. */
 .pulse-dot {
   --dot: #ffffff;
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  /* The wrapper, not just the dot, receives pointer + focus events. */
+  pointer-events: auto;
+}
+
+/* The visible 15px dot: a luminous core. */
+.pulse-dot-core {
   position: relative;
   width: 15px;
   height: 15px;
   border-radius: 9999px;
-  border: none;
-  cursor: pointer;
-  padding: 0;
   background: radial-gradient(circle at 35% 30%, #fff, var(--dot) 78%);
   box-shadow:
     0 0 0 2px color-mix(in oklch, var(--color-ink-950) 70%, transparent),
@@ -222,7 +237,7 @@ body {
 }
 
 /* The expanding signal ring — a sonar ping radiating from each soul */
-.pulse-dot::before {
+.pulse-dot-core::before {
   content: "";
   position: absolute;
   inset: 0;
@@ -231,9 +246,15 @@ body {
   animation: sonar 2.6s var(--ease-calm) infinite;
 }
 
-.pulse-dot:hover {
+/* Lift the hovered/focused soul above its neighbours so clustered dots stay
+   reachable, and keep the existing spring scale on the visible core. */
+.pulse-dot:hover,
+.pulse-dot:focus-visible {
+  z-index: 5;
+}
+.pulse-dot:hover .pulse-dot-core,
+.pulse-dot:focus-visible .pulse-dot-core {
   transform: scale(1.35);
-  z-index: 2;
 }
 
 /* The user's own "you are here" pin */
