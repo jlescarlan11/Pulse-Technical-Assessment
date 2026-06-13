@@ -42,21 +42,22 @@ export default function EntryGate({
       <div className="aurora-field" />
       <div className="signal-grain" />
 
-      {/* ---- Radar beacon: concentric rings + expanding pings ----
-          A radial mask dissolves the rings toward the centre so they read as
-          outer atmosphere instead of hard lines bisecting the wordmark/CTA. */}
+      {/* ---- Radar beacon: a halo that pulses outward from the heart ----
+          Soft, glowing rings (blurred so they read as waves of light, not
+          crisp lines) emanate on a steady rhythm. A faint mask keeps the very
+          centre — under the wordmark — clean. */}
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0"
         style={{
           maskImage:
-            "radial-gradient(circle at 50% 50%, transparent 280px, #000 600px)",
+            "radial-gradient(circle at 50% 50%, transparent 90px, #000 320px)",
           WebkitMaskImage:
-            "radial-gradient(circle at 50% 50%, transparent 280px, #000 600px)",
+            "radial-gradient(circle at 50% 50%, transparent 90px, #000 320px)",
         }}
       >
-        {/* static hairline rings */}
-        {[320, 560, 820, 1100].map((d) => (
+        {/* static hairline rings — faint radar structure */}
+        {[360, 620, 900].map((d) => (
           <span
             key={d}
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border"
@@ -68,18 +69,29 @@ export default function EntryGate({
             }}
           />
         ))}
-        {/* expanding signal pings — soft pulses of light, not crisp lines */}
-        {[0, 2.8].map((delay) => (
+        {/* pulsing halo rings — soft waves of light radiating outward */}
+        {[0, 1.5, 3, 4.5].map((delay) => (
           <span
             key={delay}
-            className="absolute left-1/2 top-1/2 h-80 w-80 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/35 blur-[2px]"
+            className="absolute left-1/2 top-1/2 h-56 w-56 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/80 blur-[1.5px]"
             style={{
-              animation: "beacon 6.4s var(--ease-calm) infinite",
+              animation: "beacon 6s var(--ease-calm) infinite",
               animationDelay: `${delay}s`,
             }}
           />
         ))}
       </div>
+
+      {/* Soft glow that breathes behind the wordmark — the pulse's heart */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/2 h-72 w-72 -translate-x-1/2 -translate-y-1/2 rounded-full"
+        style={{
+          background:
+            "radial-gradient(circle, color-mix(in oklch, var(--color-signal) 22%, transparent), transparent 68%)",
+          animation: "pulse-glow 4s var(--ease-calm) infinite",
+        }}
+      />
 
       <div className="vignette" />
 

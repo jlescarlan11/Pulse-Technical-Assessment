@@ -302,6 +302,19 @@ body {
   }
 }
 
+/* A soft glow that breathes in place — the EntryGate pulse's "heart" */
+@keyframes pulse-glow {
+  0%,
+  100% {
+    transform: scale(0.85);
+    opacity: 0.45;
+  }
+  50% {
+    transform: scale(1.12);
+    opacity: 0.85;
+  }
+}
+
 /* A contained pulse that radiates from an orb (vs. sonar's wide 3x sweep).
    Stays visible through the mid-expansion so it reads as a real halo. */
 @keyframes halo {
@@ -416,11 +429,11 @@ body {
     transform: scale(0.6);
     opacity: 0;
   }
-  35% {
-    opacity: 0.5;
+  30% {
+    opacity: 0.7;
   }
   100% {
-    transform: scale(2.4);
+    transform: scale(2.6);
     opacity: 0;
   }
 }
