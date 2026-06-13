@@ -563,3 +563,121 @@ const response = await fetch(url, {
 
 **Phase 1 deliverable:** Fully functional P2P geolocation chat/video app with cross-network connectivity and comprehensive test coverage.
 
+---
+---
+
+# Phase 2: Make It Good — "Signal in the Dark" UI/UX Redesign
+
+**Status:** Complete
+**Branch:** `feature/phase-2-ui-polish`
+**Scope:** Presentation only — **no** WebRTC / signaling / state-machine logic was changed. Phase 1's behavior is preserved byte-for-byte; this is purely how it looks and feels.
+
+---
+
+## The Brief & The Thinking
+
+Phase 1 made Pulse *work*. Phase 2 makes it something you'd be proud to show off. The starting point was competent but generic: flat `zinc` surfaces, a single `emerald-400` accent, `rounded-full` everything, essentially zero motion — and the body font was even silently falling back to Arial because a `globals.css` rule overrode Geist.
+
+The concept the product was begging for: **"Signal in the Dark."** Pulse is literally *a living radar of human presence* — an app called Pulse, showing strangers broadcasting from the dark. So every visual decision leans into that: a deep, dimensional dark (not flat zinc), one luminous **signal-green** accent used sparingly so its glow actually means something, real glassmorphism, and motion that *breathes*. The guiding metaphors were **life/heartbeat**, **signal/radar/sonar**, and **calm confidence** (generous space, restrained accent).
+
+**Deliberate constraint:** the entire motion system is hand-built **CSS** — no animation library was added. For a design-craft showcase this is both cleaner (no bundle/SSR concerns with the conditional-render-heavy `page.tsx`) and more impressive than reaching for Framer Motion.
+
+---
+
+## How We Worked (Pipeline)
+
+Same agent pipeline as Phase 1, adapted for design work:
+
+`context-scanner` → `project-manager` (8 sequenced stories) → `stakeholder` (scope/value gate) → implementation → `ui-ux-critic` (design audit) → `code-reviewer` → `qa-engineer`.
+
+Key stakeholder decisions that shaped the work:
+- **No new automated tests for the visual work** — there's no logic change and snapshot tests on Tailwind class soup are brittle. The bar is *existing tests green + clean build + manual visual/accessibility (WCAG 2.1 AA) verification*. The one carve-out: any **pure helper** added must be unit-tested (→ `lib/peerColor.ts`).
+- **No formatter adoption** (would bury the design diff); **WCAG 2.1 AA** as the accessibility bar.
+
+The creative brief lives at `.claude/knowledge/phase-2-design-brief.md`.
+
+---
+
+## What Changed
+
+### Foundation: a real design system (`app/globals.css`, `app/layout.tsx`)
+
+The spine everything hangs from. Replaced the `--background`/`--foreground`-only setup with a genuine token system in Tailwind v4's `@theme`:
+
+- **Color scales** — `ink-*` (a cool, dimensional near-black, not flat zinc), `haze-*` (text tiers), `signal-*` (the luminous mint-cyan accent `#34f0bf`), `aurora-*` (atmospheric backdrop secondaries), and `danger-*`.
+- **Radii, elevation/glow shadows, blur**, and a **motion vocabulary**: signature easings (`--ease-signal` / `--ease-spring` / `--ease-calm`) and `--animate-*` utilities (`fade-up`, `scale-in`, `slide-in`, `pill-in`, `msg-in`, …).
+- **Reusable atmosphere helpers** — `.glass`, `.glass-faint`, `.aurora-field`, `.signal-grain`, `.vignette`.
+- **Fixed the font** — removed the Arial override so Geist actually renders; committed to a dark `color-scheme`.
+- **Accessibility baked in** — pill-shaped focus rings that follow each control's own radius; a `prefers-reduced-motion` block that stills ambient motion and, crucially, holds "live" status dots at a steady, visible glow (forcing `.animate-ping` ripples off and `.animate-pulse` dots to full opacity, so a status indicator never freezes mid-fade).
+- Art-directed the **Mapbox controls** to match the dark glass.
+
+### `lib/peerColor.ts` (new, unit-tested) — one identity color per peer
+
+A peer's color must be **stable from their map dot → connection prompt → chat header**. Extracted the previously-triplicated hashing into one helper, with two deliberate rules:
+- **Pinned saturation/lightness** (85% / 64%) so the map reads as one cohesive signal field, not confetti.
+- **A hue wedge (130–189°) excluded** so a peer's color can *never* collide with the reserved signal-mint accent — protecting the "the green is *the* signal" idea the whole concept rests on. (The accent `#34f0bf` computes to hue ~164°, right in the excluded band.)
+
+`lib/peerColor.test.ts` covers determinism, the wedge exclusion across 500 ids, valid range, and pinned S/L.
+
+### Per-surface redesign
+
+- **EntryGate** — atmospheric first impression: a living aurora backdrop, a radar/beacon field, the Geist wordmark with a signal glow, a glowing CTA with press + shimmer micro-interactions, and *designed* locating/error states (not a bare label swap).
+- **WorldMap (the hero)** — luminous breathing peer dots with sonar rings (the dot reads a `--dot` CSS custom property; the `.pulse-dot`/`.pulse-me`/`.pulse-me-label` class-hook contract with the marker JS was preserved), a refined glowing "You" pin, and a glass brand + live-presence HUD. Busy peers are dimmed **and** made non-interactive (`pointer-events: none`) so the hover/cursor affordance matches what a tap will do.
+- **ConnectionPrompt** — an "incoming signal" glass modal: spring entrance, an identity orb in the peer's own hue, plus real **focus management** (autofocus, Tab trap, Escape to decline).
+- **ChatPanel** — a glass drawer that slides in, animated message entry, a warm empty state, a polished composer, and a `connecting`/`connected` affordance. Also fixed a latent robustness bug: auto-scroll switched from `scrollIntoView` (which could scroll the whole page) to scrolling the **list container** itself, and added a presentation-only "still connecting…" hint after 8s so the connecting state is never a silent dead end.
+- **VideoPanel** — cinematic full-bleed remote, a settling floating PiP, **auto-calming controls** (they recede after idle and are made `pointer-events-none` while hidden so the invisible "End" button can't be tapped, while `focus-within` still reveals them for keyboard users), and a designed waiting state.
+- **Toasts / notices / pills** (`app/page.tsx`) — refined glass with enter motion and `role="status"` for non-visual feedback; the WebRTC/state logic in `page.tsx` is untouched (only `activePeerId` derivation + prop pass-throughs were added).
+
+---
+
+## Design Iterations (the interesting part)
+
+Good design is iteration. Three details got reworked based on direct visual review:
+
+### 1. ConnectionPrompt orb halo — "too big and weird" → contained → balanced
+
+The orb's pulse initially reused the map's `sonar` keyframe, which scales to **3×**. On the 80px orb box that expanded to ~240px — a giant ring that **burst out of the card and collided with the title**.
+
+- **First fix (overcorrected):** a new contained `halo` keyframe (scale → 1.4×) and a smaller orb. Now it was *too small* to read as a halo.
+- **Final:** the real insight was that the ring **faded out before it got wide**, so bumping the peak scale didn't make it *read* bigger. Retuned the opacity curve to **stay visible through the mid-expansion** (holds ~0.22 at 1.45× before fading at 1.8×), restored the orb to full size, and added title clearance. `sonar` was left untouched — it's still correct for the map dots / "You" pin, where a wide sweep reads as a signal radiating across geography. **Two named keyframes with distinct intent**, rather than overloading one.
+
+### 2. EntryGate radar — bisecting the text → masked away → a living halo pulse
+
+The landing's concentric rings + expanding green pings were centered on the viewport — *the same place the wordmark/tagline/CTA live* — so crisp 2px green rings sliced straight through the text.
+
+- **First fix (overcorrected):** a radial mask dissolved the rings toward the center + softened the pings. Clean, but it masked the pulse into near-invisibility — losing the life.
+- **Final:** brought back a clearly-felt pulse done *well*. Soft, **blurred** rings (waves of light, not crisp lines) swell and radiate outward on a steady ~1.5s rhythm, with a new `pulse-glow` keyframe driving a glow that **breathes behind the wordmark** as the pulse's "heart." A *light* mask keeps only the dense center clean. The lesson mirrors the orb: keep the motion visible and soft so it haloes the content instead of cutting through it.
+
+### 3. Chat send icon — pointing the wrong way
+
+The paper-plane glyph's tip pointed **back at the input**. First corrected to up-right, then — per the Messenger reference — rotated to point **horizontally right**, toward where the message goes.
+
+---
+
+## Verification
+
+- **Build clean** (`npm run build`), **lint clean** (one pre-existing, unrelated `api/poll/route.ts` warning), **24/24 tests pass** (the 20 Phase-1 tests + 4 new `peerColor` tests).
+- **Visual verification** via headless-Chrome screenshots of every iteration (EntryGate, ConnectionPrompt, ChatPanel, the live map HUD). Throwaway `app/preview` harnesses were used to render overlays/streams-dependent surfaces in isolation, then deleted. (Note: the map needs real GPU for WebGL — use `--use-angle=swiftshader` to render tiles headless.)
+- **Review gates:** `ui-ux-critic` (0 critical, `aesthetic_match: yes`), `code-reviewer` (APPROVED — verified the WebRTC/state logic is unchanged), `qa-engineer` (manual walkthrough + edge-case catalog incl. reduced-motion, focus paths, peer-color consistency).
+- Two reviewer/QA findings were addressed: the calmed VideoPanel control bar is `pointer-events-none` (was invisible-but-clickable), and the dead no-token map fallback was made reachable (dropped the placeholder token default so the graceful "set your token" card actually shows).
+
+---
+
+## Phase 2 Change Summary
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `globals.css` / `layout.tsx` | Full design-token + CSS motion system; Geist font fix; reduced-motion + focus rings | One cohesive system so every surface is consistent; no animation library needed |
+| `lib/peerColor.ts` (new) | Shared per-peer color; signal-mint hue wedge excluded; unit-tested | Stable identity across surfaces; peers never collide with the accent |
+| `EntryGate.tsx` | Atmospheric landing, glowing CTA, **living halo pulse** | First impression sets the bar; the app named Pulse should *pulse* |
+| `WorldMap.tsx` | Breathing luminous dots, glass HUD, busy dots non-interactive | The hero surface; affordance must match behavior |
+| `ConnectionPrompt.tsx` | Glass modal, peer-hue identity orb (**retuned halo**), focus trap | "Incoming signal" moment; accessible |
+| `ChatPanel.tsx` | Glass drawer, animated messages, container-scoped scroll, send-icon fix, slow-connect hint | Crafted conversation; no silent dead ends |
+| `VideoPanel.tsx` | Cinematic full-bleed, floating PiP, auto-calming (pointer-safe) controls | Immersive call; controls get out of the way |
+| `page.tsx` | Glass toast/pill restyling + `role="status"`; prop wiring | UI only — zero state-machine change |
+
+**Total:** 1,093 insertions / 138 deletions across 8 app files + 2 new `lib` files.
+**Risk:** Very low — presentation only, no behavioral change, all tests green.
+
+**Phase 2 deliverable:** A genuinely beautiful, cohesive, motion-rich Pulse — a deep dimensional dark with one luminous signal accent, real glass, and breathing life across every surface — with no regression to Phase 1's functionality.
+
