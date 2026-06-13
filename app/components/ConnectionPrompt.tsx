@@ -1,5 +1,8 @@
 "use client";
 
+import { useEffect, useRef } from "react";
+import { peerColor } from "@/lib/peerColor";
+
 // Reusable centered prompt for "someone wants to connect" and
 // "someone wants to start video".
 export default function ConnectionPrompt({
@@ -9,6 +12,8 @@ export default function ConnectionPrompt({
   declineLabel,
   onAccept,
   onDecline,
+  peerId,
+  variant = "connect",
 }: {
   title: string;
   subtitle?: string;
@@ -16,27 +21,139 @@ export default function ConnectionPrompt({
   declineLabel: string;
   onAccept: () => void;
   onDecline: () => void;
+  peerId?: string;
+  variant?: "connect" | "video";
 }) {
+  const acceptRef = useRef<HTMLButtonElement>(null);
+  const declineRef = useRef<HTMLButtonElement>(null);
+
+  // Focus management: move focus into the dialog, trap Tab between the two
+  // actions, and let Escape decline.
+  useEffect(() => {
+    acceptRef.current?.focus();
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onDecline();
+      } else if (e.key === "Tab") {
+        e.preventDefault();
+        const next =
+          document.activeElement === acceptRef.current
+            ? declineRef.current
+            : acceptRef.current;
+        next?.focus();
+      }
+    }
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [onDecline]);
+
+  const accent =
+    peerId !== undefined ? peerColor(peerId) : "var(--color-signal)";
+
   return (
-    <div className="absolute inset-0 z-20 flex items-center justify-center bg-black/60 p-6">
-      <div className="w-full max-w-xs rounded-2xl bg-zinc-900 p-6 text-center text-zinc-100 shadow-xl">
-        <h2 className="text-lg font-semibold">{title}</h2>
-        {subtitle && <p className="mt-1 text-sm text-zinc-400">{subtitle}</p>}
-        <div className="mt-5 flex gap-3">
+    <div
+      className="animate-fade-in absolute inset-0 z-40 flex items-center justify-center bg-ink-950/70 p-6 backdrop-blur-md"
+      role="dialog"
+      aria-modal="true"
+      aria-label={title}
+      onClick={onDecline}
+    >
+      <div
+        className="animate-scale-in glass w-full max-w-sm rounded-2xl p-7 text-center"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Identity orb — an incoming signal in the peer's colour */}
+        <div className="relative mx-auto mb-5 flex h-20 w-20 items-center justify-center">
+          <span
+            className="absolute inset-0 rounded-full"
+            style={{
+              animation: "sonar 2.4s var(--ease-calm) infinite",
+              border: `2px solid ${accent}`,
+            }}
+          />
+          <span
+            className="absolute inset-0 rounded-full"
+            style={{
+              animation: "sonar 2.4s var(--ease-calm) infinite",
+              animationDelay: "1.2s",
+              border: `2px solid ${accent}`,
+            }}
+          />
+          <span
+            className="relative flex h-14 w-14 items-center justify-center rounded-full text-ink-950"
+            style={{
+              background: `radial-gradient(circle at 35% 30%, #fff, ${accent} 75%)`,
+              boxShadow: `0 0 28px -4px ${accent}`,
+            }}
+          >
+            {variant === "video" ? <VideoIcon /> : <SignalIcon />}
+          </span>
+        </div>
+
+        <h2 className="text-xl font-semibold tracking-tight text-haze-50">
+          {title}
+        </h2>
+        {subtitle && (
+          <p className="mt-1.5 text-sm leading-relaxed text-haze-300">
+            {subtitle}
+          </p>
+        )}
+
+        <div className="mt-7 flex gap-3">
           <button
+            ref={declineRef}
             onClick={onDecline}
-            className="flex-1 rounded-full border border-zinc-700 px-4 py-2 text-sm font-medium text-zinc-300 hover:border-zinc-500"
+            className="flex-1 rounded-full border border-haze-200/15 bg-ink-800/50 px-4 py-3 text-sm font-medium text-haze-200 transition hover:border-haze-200/30 hover:text-haze-50 active:scale-95"
           >
             {declineLabel}
           </button>
           <button
+            ref={acceptRef}
             onClick={onAccept}
-            className="flex-1 rounded-full bg-emerald-400 px-4 py-2 text-sm font-semibold text-zinc-950 hover:bg-emerald-300"
+            className="flex-1 rounded-full bg-signal px-4 py-3 text-sm font-semibold text-ink-950 shadow-glow transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:shadow-glow-lg active:scale-95"
           >
             {acceptLabel}
           </button>
         </div>
       </div>
     </div>
+  );
+}
+
+function SignalIcon() {
+  return (
+    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path
+        d="M5 12a7 7 0 0 1 7-7M5 12a7 7 0 0 0 7 7M19 12a7 7 0 0 0-7-7M19 12a7 7 0 0 1-7 7"
+        stroke="currentColor"
+        strokeWidth="1.6"
+        strokeLinecap="round"
+        opacity="0.55"
+      />
+      <circle cx="12" cy="12" r="2.4" fill="currentColor" />
+    </svg>
+  );
+}
+
+function VideoIcon() {
+  return (
+    <svg className="h-6 w-6" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <rect
+        x="3"
+        y="6"
+        width="12"
+        height="12"
+        rx="2.5"
+        stroke="currentColor"
+        strokeWidth="1.7"
+      />
+      <path
+        d="M15 10.5l5-2.8v8.6l-5-2.8"
+        stroke="currentColor"
+        strokeWidth="1.7"
+        strokeLinejoin="round"
+      />
+    </svg>
   );
 }
