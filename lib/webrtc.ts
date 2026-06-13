@@ -3,7 +3,13 @@ export type PeerControl =
   | "video-request"
   | "video-accept"
   | "video-decline"
-  | "video-end";
+  | "video-end"
+  // Phase 4 "Reciprocal Video" presence shield. Sent over the existing data
+  // channel via sendControl(). "presence-present" doubles as the periodic
+  // heartbeat (fail-closed: a peer is treated as away until one arrives and if
+  // they stop arriving); "presence-away" is the explicit instant cut.
+  | "presence-present"
+  | "presence-away";
 
 export interface TurnCredentialsResponse {
   urls: string[];
@@ -16,6 +22,10 @@ interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
   onControl: (ctrl: PeerControl) => void;
+  // Phase 4 typing indicator. Fired when the peer's typing state flips. Rides
+  // the existing data channel via a {t:"typing", on} message — fully ephemeral,
+  // never stored (consistent with the app's no-persistence privacy model).
+  onTyping: (isTyping: boolean) => void;
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onChannelOpen: () => void;
@@ -101,7 +111,14 @@ export class PeerSession {
   private readonly polite: boolean;
   private makingOffer = false;
   private ignoreOffer = false;
+  // The stream bound to the caller's LOCAL self-view. Its video track is the
+  // ORIGINAL camera track and must NEVER be disabled — the user always sees
+  // themselves, even while the outgoing feed is gated.
   private localStream: MediaStream | null = null;
+  // The CLONE of the camera video track that is actually sent to the peer.
+  // Cloning shares the same camera source but gives an independent .enabled, so
+  // gating it blacks the transmitted frames without touching the local preview.
+  private sentVideoTrack: MediaStreamTrack | null = null;
   private closed = false;
   private readonly cb: PeerCallbacks;
   private pendingCandidates: RTCIceCandidateInit[] = [];
@@ -171,6 +188,8 @@ export class PeerSession {
           this.cb.onChat(msg.text);
         } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
           this.cb.onControl(msg.ctrl as PeerControl);
+        } else if (msg.t === "typing" && typeof msg.on === "boolean") {
+          this.cb.onTyping(msg.on);
         }
       } catch {}
     };
@@ -234,36 +253,100 @@ export class PeerSession {
     this.safeSend({ t: "ctrl", ctrl });
   }
 
+  // Phase 4 typing indicator. Broadcasts the local typing state to the peer
+  // over the existing data channel. safeSend() no-ops if the channel isn't
+  // open, so this is safe to call at any point in the session lifecycle.
+  sendTyping(on: boolean): void {
+    this.safeSend({ t: "typing", on });
+  }
+
   private safeSend(obj: unknown) {
     if (this.dc && this.dc.readyState === "open") {
       this.dc.send(JSON.stringify(obj));
     }
   }
 
+  // Starts the camera and wires up the clone-and-gate split.
+  //
+  // localStream keeps the ORIGINAL camera tracks — the caller binds this to the
+  // local <video> self-view, and we never disable its video track, so the user
+  // always sees a live preview of themselves.
+  //
+  // The peer connection instead receives a CLONE of the camera video track
+  // (track.clone() shares the same camera source but has an independent
+  // .enabled). Gating toggles the clone, so the transmitted feed can go black
+  // without ever darkening the local preview. Audio is added directly (it is
+  // never gated). The clone is associated with localStream on addTrack so the
+  // remote ontrack handler still groups video + audio into one stream.
   async startVideo(): Promise<MediaStream> {
     if (!this.localStream) {
       this.localStream = await navigator.mediaDevices.getUserMedia({
         video: true,
         audio: true,
       });
-      for (const track of this.localStream.getTracks()) {
+
+      const [videoTrack] = this.localStream.getVideoTracks();
+      if (videoTrack) {
+        // Send a clone so gating it never affects the original preview track.
+        this.sentVideoTrack = videoTrack.clone();
+        // Born gated (fail-closed): the clone starts disabled so no clear frame
+        // can ever flow before the presence engine confirms mutual presence —
+        // we don't rely on React effect ordering for the initial cut.
+        this.sentVideoTrack.enabled = false;
+        this.pc.addTrack(this.sentVideoTrack, this.localStream);
+      }
+
+      // Audio is never gated; send the original track directly.
+      for (const track of this.localStream.getAudioTracks()) {
         this.pc.addTrack(track, this.localStream);
       }
     }
     return this.localStream;
   }
 
+  // Gate the OUTGOING video: the protective core of the Phase 4 presence shield.
+  // Setting track.enabled = false makes the sender transmit black frames while
+  // audio keeps flowing, so no clear video reaches the peer unless both sides
+  // are present. This is intentionally the reliable primitive: a CSS/canvas
+  // blur cannot run while the local tab is hidden (requestAnimationFrame is
+  // throttled/paused in background tabs), whereas track.enabled is enforced by
+  // the media pipeline regardless of tab state. Toggling .enabled does NOT
+  // require renegotiation.
+  //
+  // Crucially we gate the SENT CLONE (this.sentVideoTrack), never the original
+  // camera track in localStream — so the user's LOCAL self-view stays live the
+  // whole time. The clone's black frames still reach the peer. We also iterate
+  // the pc video senders (whose track is the clone) for defense in depth, so
+  // the gate holds no matter which reference is read. No-op-safe before any
+  // video track exists.
+  setOutgoingVideoEnabled(enabled: boolean): void {
+    if (this.sentVideoTrack) {
+      this.sentVideoTrack.enabled = enabled;
+    }
+    for (const sender of this.pc.getSenders()) {
+      if (sender.track && sender.track.kind === "video") {
+        sender.track.enabled = enabled;
+      }
+    }
+  }
+
   stopVideo() {
     if (this.localStream) {
+      // Stop the ORIGINAL camera tracks (turns the camera light off).
       for (const track of this.localStream.getTracks()) track.stop();
-      for (const sender of this.pc.getSenders()) {
-        if (sender.track) {
-          try {
-            this.pc.removeTrack(sender);
-          } catch {}
-        }
-      }
       this.localStream = null;
+    }
+    // Stop the SENT clone too — it holds its own handle on the camera source.
+    if (this.sentVideoTrack) {
+      this.sentVideoTrack.stop();
+      this.sentVideoTrack = null;
+    }
+    for (const sender of this.pc.getSenders()) {
+      if (sender.track) {
+        try {
+          this.pc.removeTrack(sender);
+        } catch {}
+      }
     }
   }
 

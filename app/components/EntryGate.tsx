@@ -69,11 +69,18 @@ export default function EntryGate({
             }}
           />
         ))}
-        {/* pulsing halo rings — soft waves of light radiating outward */}
+        {/* pulsing halo rings — soft waves of light radiating outward.
+            The non-zero resting opacity (opacity-60) keeps the radar visible
+            for prefers-reduced-motion users: the global reduce block freezes
+            the `beacon` keyframe on frame 0 (opacity 0), which would otherwise
+            make these rings vanish entirely. With the animation running, the
+            keyframe's own opacity values drive the pulse, so the animated look
+            is unchanged; only the frozen resting frame falls back to this
+            steady 60%. Mirrors VideoPanel's beacon-ring fix. */}
         {[0, 1.5, 3, 4.5].map((delay) => (
           <span
             key={delay}
-            className="absolute left-1/2 top-1/2 h-56 w-56 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/80 blur-[1.5px]"
+            className="absolute left-1/2 top-1/2 h-56 w-56 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/80 opacity-60 blur-[1.5px]"
             style={{
               animation: "beacon 6s var(--ease-calm) infinite",
               animationDelay: `${delay}s`,
@@ -116,11 +123,15 @@ export default function EntryGate({
           signal. Say hello.
         </p>
 
-        {/* CTA */}
+        {/* CTA
+            min-w-[16rem] is sized for the wider "Finding your signal…" + spinner
+            state so the label swap between idle and locating causes no
+            horizontal reflow of the centred hero. justify-center keeps both
+            label variants optically centred within that fixed width. */}
         <button
           onClick={enter}
           disabled={locating}
-          className="group relative mt-10 inline-flex items-center gap-3 overflow-hidden rounded-full bg-signal px-9 py-4 text-base font-semibold text-ink-950 shadow-glow transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:shadow-glow-lg active:scale-95 disabled:cursor-default disabled:hover:scale-100"
+          className="group relative mt-10 inline-flex min-w-[16rem] items-center justify-center gap-3 overflow-hidden rounded-full bg-signal px-9 py-4 text-base font-semibold text-ink-950 shadow-glow transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:shadow-glow-lg active:scale-95 disabled:cursor-default disabled:hover:scale-100"
         >
           {/* shimmer sweep */}
           <span

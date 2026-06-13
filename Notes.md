@@ -906,3 +906,181 @@ Phase 2 merged to `main` while this branch was in flight, and it had also touche
 - **TURN credential re-fetch (ICE restart)** for calls that outlive the 600s TTL — there is already a `TODO` for this in `lib/webrtc.ts`.
 
 **Phase 3 deliverable:** A coordination API that can be shown to strangers — every session-altering call proves it owns the session via an anonymous capability token, billed and abuse-prone routes are gated and rate-limited, the app ships clickjacking/XSS headers around its camera and mic, and a CI merge gate stands behind it all — with no regression to the Phase 1 functionality or Phase 2 polish.
+
+---
+---
+
+# Phase 4: Make It Alive — "Reciprocal Video" (Mutual-Presence Privacy)
+
+**Status:** Complete
+**Scope:** A new, self-designed feature built on the Phase 1–3 base. Touches the video-call path and its UI only — the signaling API, the auth/token model, and the connection state machine are untouched. Presence rides the *existing* WebRTC data channel; **no new API route, no new DB column.**
+
+---
+
+## The Brief & The Thinking
+
+The Phase 4 brief was open-ended: *build something new that makes Pulse feel more alive and/or safe — a unique feature of your own design.* The constraint we set ourselves was that whatever we shipped had to fit Pulse's three values — **anonymous** (no identity), **frictionless** (no new user action), **transient** (no new persistent state) — and, above all, be **honest**: it must not claim a protection it can't actually deliver.
+
+### The pivot (this is the judgment call worth telling)
+
+We first explored and partly built a different feature: a Signal-style **SAS "Safety Phrase"** — a short authentication string derived from the WebRTC fingerprints so two strangers could read it aloud and verify their encrypted channel wasn't being man-in-the-middled by the signaling relay. It's a real, respectable cryptographic primitive. **We rejected it on reflection**, for reasons that are themselves the point:
+
+- It is only meaningfully verifiable **over live video** (you have to see/hear the other person say the phrase), which is a narrow window.
+- It protects against **operator-MITM** — a sophisticated, *hard-to-feel* threat. For an anonymous stranger app, the actual person you're talking to has no identity to bind the phrase to, so "verified" doesn't mean much.
+- The compare-the-phrase-in-chat framing risked **false confidence** — the worst outcome in a safety feature, because it makes a user feel safer without being safer.
+
+We also considered and **rejected outright a "block screenshots" idea**: no web API can prevent screenshots, and shipping a button that claims to would be the same false-confidence trap in a louder costume.
+
+So instead of chasing a threat strangers can't feel, we attacked the one they *can*: the **asymmetry**.
+
+### What the real fear is
+
+The genuine fear with stranger video isn't the operator quietly MITM-ing your call. It's **the person on the other end lurking on you, or recording you, while you believe they're engaged.** That asymmetry — you're present and exposed; they're absent and watching — is the trust failure that actually happens. So the feature removes it by construction: **you are only visible while they are too.**
+
+---
+
+## What It Is
+
+**Reciprocal Video.** During a video call, clear video is transmitted **only while both peers' browser tabs are present.** The instant either side switches away (tab hidden, or the page is unloading), that side's **outgoing video track is disabled at the source** — real black frames from the media pipeline, *not* a cosmetic CSS blur — and each side sees an honest "stepped away" state. **Audio keeps flowing throughout.** On return, video resumes once both sides are present again.
+
+The result: you literally cannot watch — or record a clear feed of — a stranger who isn't present with you. It kills one-sided lurking and recording, and as a bonus it makes the call feel *alive*: the video breathes with mutual presence.
+
+### Why it fits Pulse
+
+- **Anonymous** — it binds to nothing about who you are; it's purely about who's *present*.
+- **Frictionless** — zero user action. There's no button, no setup; it's automatic the moment a video call is active.
+- **Transient** — presence rides the existing data channel as control messages; there is no DB write and no new API call.
+
+### The honesty line (a hard design constraint)
+
+We **cannot** prevent screenshots or screen recording, and the UI **never claims to.** This is enforced in the copy: detection is **tab visibility/focus only — not gaze** — so every string says **"stepped away"** / **"tab inactive"**, and never "looked away." (`VideoPanel.tsx` copy: *"Stranger stepped away — their video pauses while their tab is inactive. Audio is still connected."*) The honest, exact claim the feature makes is: **"you're only visible while they are too"** — no more.
+
+---
+
+## How It Works (technical)
+
+**Presence detection** (`app/page.tsx`, the mutual-presence engine effect):
+- Driven by `document` `visibilitychange` plus `pagehide`/`beforeunload` — deliberately **not** `window` blur, which is too twitchy (alt-tab, clicking a dev console, a notification all fire it and would strobe the video).
+- Going hidden is **debounced 500ms** (`AWAY_DEBOUNCE_MS`) so a momentary flick doesn't cut the feed; `pagehide`/`beforeunload` cut **instantly, no debounce** (unload is the most dangerous "absent" state).
+- Resuming **settles 150ms** (`RESUME_DELAY_MS`) and re-checks mutual presence at fire time, so rapid flap-back doesn't strobe.
+
+**Signaling** — peer-to-peer over the existing data channel. `PeerControl` (in `lib/webrtc.ts`) was extended with two messages, `presence-present` and `presence-away`, sent via the existing `sendControl()`. No new API route, no DB.
+
+**Fail-closed heartbeat** — `presence-present` doubles as a periodic heartbeat: each present peer pings every **2s** (`HEARTBEAT_INTERVAL_MS`). If **no ping arrives within 4s** (`HEARTBEAT_TIMEOUT_MS`) — e.g. the data channel silently dropped — the peer is treated as **away** and the outgoing video is cut. A dropped channel can therefore never leak a clear feed. The peer state also **initializes to away** (fail-closed). To avoid a normal call starting with ~2s of black video, an immediate `presence-present` is sent the moment the engine activates, so the peer clears its fail-closed default within ~1 RTT.
+
+**The protective core** — `PeerSession.setOutgoingVideoEnabled()` in `lib/webrtc.ts` toggles `track.enabled` (flipping both the local `MediaStreamTrack` and the matching `RTCRtpSender` track). Per the WebRTC spec this transmits **black frames with no renegotiation.** This is the reliable primitive *precisely because* the obvious alternative isn't: a canvas/CSS blur **cannot run while the tab is hidden** — `requestAnimationFrame` is throttled/paused in a background tab, which is exactly when protection is needed. A blur is also cosmetic and wouldn't stop a recorder. Disabling the source track is enforced by the media pipeline regardless of tab state.
+
+**State hygiene** — all presence state is reset on teardown / `endVideo` (`resetPresence()` returns `peerAway` to its fail-closed `true`), so it never leaks across peers. **Audio is never cut.** A chat-only connection runs none of this — the engine is gated on `video === "active"`.
+
+---
+
+## Key Decisions & Honesty
+
+- **Advisory to the connection, never punitive.** It never drops the call; it only pauses *video clarity*. Audio and chat continue.
+- **Non-optional — no disable toggle.** A privacy feature you can quietly switch off invites coercion ("turn it off so I can see you"). Making it unconditional is the safer default.
+- **Tab-hidden trigger, not window-blur, for v1** — to avoid false pauses; **fail-closed** on any unknown/stale presence.
+- **Call-start flicker, handled honestly.** Because the peer initializes fail-closed (`peerAway = true`), a fresh call could otherwise flash a "Stranger stepped away" overlay before the first heartbeat. A `peerHasBeenPresent` latch gates the mid-call away overlay (and its screen-reader announcement) so a new call reads *waiting → live*, never *waiting → stepped-away → live*. Before the stranger has been seen present even once, the held state uses neutral tab/presence language, never "they're away."
+
+**What it does NOT do (stated plainly, in the UI and here):**
+- It does **not** prevent screenshots or screen recording of the clear feed during legitimate mutual presence.
+- It does **not** protect against a compromised endpoint (malware on the peer's machine, a modified client).
+- It relies on **tab presence, not gaze** — a present-but-not-looking peer is, correctly, treated as present.
+
+---
+
+## How We Worked & Verification
+
+Built through the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `backend-engineer` + `frontend-engineer` → `ui-ux-critic` + security/QA review → fixes → `code-reviewer` (**APPROVE**) → `qa-engineer` (**no blockers**).
+
+- **Tests: 98 passing** (up from Phase 3's 77), including `setOutgoingVideoEnabled()` — the protective primitive — and the away-state UI matrix (only-peer-away / only-local-away / both-away, plus the call-start fail-closed case). `tsc` clean, lint clean, production build succeeds.
+- Transparently: the `page.tsx` presence engine was **once lost to an editing mistake and reconstructed from the spec + review notes.** The recovery was clean — it was re-reviewed and the suite is green — but it's worth recording that it happened.
+
+> The rest of Phase 4 was built on the same branch (`feature/phase-4-privacy-shield`), iterating on this base. The four follow-on pieces below each went through the same pipeline; the running numbers in the closing summary reflect the whole arc.
+
+---
+
+## Iteration: Live Self-View (clone-and-gate)
+
+**The problem, found in real use.** The first Reciprocal Video version gated the **shared** camera track. That was correct for the *peer's* protection, but it had an unintended local cost: when the stranger stepped away and we cut our own outgoing video, our **own self-view went black too.** In testing this read as a bug — *"why did my camera turn off? I'm right here"* — and it quietly undermined the feature's honesty, because the present user looked punished for the absent peer's absence.
+
+**The fix — split the track.** `startVideo()` now sends a `clone()` of the camera video track and gates **only the clone** (`sentVideoTrack`, born `enabled = false` — fail-closed). The **original** track stays in `localStream` and drives the local `<video>` self-view, which is **never** disabled. A clone shares the same camera source but carries its own independent `.enabled`, so the transmitted feed can go black without ever darkening the local preview. Net effect: **the present user always sees themselves**, while the absent peer still receives black frames — identical protection on the wire, none of the local confusion.
+
+`VideoPanel` followed: instead of a black "Paused" box, the self-view now shows the **live** local preview with a compact **"Not shared"** badge, so the user can see both that they're on camera *and* that nothing clear is currently going out.
+
+**Security re-audit.** Splitting the track touches the protective core, so this got a focused re-review. No clear-frame leak path: only the gated clone is ever attached to an `RTCRtpSender`; it is born disabled; `setOutgoingVideoEnabled()` still iterates the video senders for defense in depth; and `stopVideo()` stops **both** the original and the clone on teardown (the clone holds its own handle on the camera source). Verdict: **ship.** Files: `lib/webrtc.ts` (`sentVideoTrack` clone + gate), `app/components/VideoPanel.tsx`.
+
+---
+
+## Follow-on: UI/UX Pass
+
+Driven by a full `ui-ux-critic` audit of every surface, not a cosmetic polish. Shipped in three batches.
+
+**Batch 1 — Map accessibility (the most serious finding).** The core action of the whole app — tapping a stranger's dot to say hello — was a ~15px, pointer-only, **keyboard-unreachable** target. That's an action-blocking accessibility failure, not a nicety. Fixes:
+- Each dot is now a **transparent 44px button** wrapped around the ~15px visible core (meets the touch-target minimum without changing the visual), fully **keyboard- and screen-reader-operable.**
+- The **"N signals nearby"** chip became an accessible **disclosure list** of the nearby signals (Escape and outside-click close it; focus returns to the chip on close).
+- Added a **"Tuning in…"** map loading state, a first-entry **"Tap a signal to say hello"** coach hint, and a **zero-peers reassurance card** so an empty map reads as *quiet*, not *broken*.
+
+**Batch 2 — Seam / feedback states.** The gaps between states are where a stranger app feels unreliable:
+- The **incoming connection prompt now auto-expires ~2s before** the requester's 30s timeout, so a late "Connect" can't accept into a peer the other side has already torn down.
+- Transient notices were **raised above panels (`z-50`)** so they're never occluded by the video/chat surfaces.
+- The **"Session expired"** message became a **persistent danger card with a real Reload button**, distinct from transient toasts — a terminal state should not look like a notification that fades.
+
+**Batch 3 — Panel polish.**
+- The **"Not shared"** PiP badge collapsed from a 4-line wrap to **one compact pill.**
+- The pre-call video wait now **escalates after ~9s** ("Still waiting — they may be having camera trouble") so a stall is explained rather than silent.
+- `ChatPanel`'s **"Say hello."** empty state only appears **once connected**; during the handshake it shows a quiet **"Connecting…"** body instead of inviting a message into a channel that isn't open yet.
+
+---
+
+## Follow-on: Identity — Call-Signs
+
+**The problem.** Strangers were distinguishable only by their `peerColor`. Color is unspeakable ("the blue one" breaks down with two blues), unmemorable across a session, and **invisible to color-blind users** — so the only identity signal failed exactly the people who most need a non-color cue.
+
+**What it is.** A new `lib/callsign.ts` derives a deterministic two-word **"Adjective Noun"** handle (e.g. *"Quiet Fox"*) from `peerId`. It hashes the id with **FNV-1a** (the same hashing voice as `peerColor`), then takes **two different 6-bit slices** — low bits → adjective, high bits → noun — into two curated **64-entry** atmospheric wordlists (`& 63`, so no modulo bias). It is pure and synchronous — no storage, no randomness, no `Date` — so the same id always yields the same handle.
+
+**Deliberate constraints, all enforced in code:**
+- The two wordlists are **disjoint**, so a same-word pairing like *"Dusk Dusk"* is impossible by construction — a handle never looks like a bug.
+- **"Signal" / "Beacon" are excluded** from the words, so a handle can never collide with the app's own vocabulary or with the `"Quiet Signal"` fallback used for an empty/undefined id.
+- It is **paired with, never replaces, `peerColor`.** Uniqueness is the color's job, so there is **intentionally no runtime collision handling** — call-signs are *allowed* to collide, and that's the design, not a gap.
+- It is **ephemeral per session** and implies **no account** — consistent with Pulse's anonymity.
+
+Shown consistently in the **map peer-list**, the **ConnectionPrompt**, and the **ChatPanel header**, so the same stranger reads as the same call-sign everywhere.
+
+**Also in this batch (smaller `ui-ux-critic` items):** the EntryGate **reduced-motion beacon** now gives the rings a resting opacity so they don't vanish entirely under `prefers-reduced-motion` (matching what VideoPanel already did); **"End chat" vs "End video"** as a deliberate severity pair; and an **EntryGate CTA min-width** so the label swap doesn't reflow the button. The proposed **mono-tracking sweep was deliberately dropped** as imperceptible churn — not worth the diff. This batch also established the **first component tests** (RTL / jsdom), including **keyboard coverage of the map peer-list.**
+
+---
+
+## Follow-on: Live Typing Indicator
+
+**What it is.** A `{ t: "typing", on }` message rides the **existing WebRTC data channel** — ephemeral, never stored, **no API, no DB** — consistent with the same privacy model as presence. `lib/webrtc.ts` gained `sendTyping()`, an `onTyping` callback, and a guarded inbound branch (`msg.t === "typing" && typeof msg.on === "boolean"`). `page.tsx` holds `peerTyping`, and **clears it on any incoming message and on teardown**, so a typing state can never leak across peers.
+
+`ChatPanel` shows a **"{call-sign} is typing…"** bubble with breathing dots in the **peer's color** (reduced-motion → static dots; `aria-live="polite"` for screen readers). The composer announces typing **on input, throttled (~1.5s)** with a **~2.5s idle retract** — and it also retracts on **send / empty field / unmount**, and **never fires while disconnected** (`safeSend` no-ops on a closed channel, so it's lifecycle-safe regardless).
+
+**One nice refinement:** on an empty thread, the **"Say hello."** empty state **yields to the typing indicator**, so the very first moment of a chat — the stranger starting to type — isn't cluttered by the prompt that's about to be answered.
+
+---
+
+## Phase 4 Change Summary
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `lib/webrtc.ts` — `PeerControl` | Added `presence-present` / `presence-away` control messages | Presence rides the existing data channel; no new API or DB |
+| `lib/webrtc.ts` — `setOutgoingVideoEnabled()` (new) | Toggle `track.enabled` (clone + sender), no renegotiation | The reliable protective primitive; a blur can't run in a hidden tab |
+| `lib/webrtc.ts` — `sentVideoTrack` clone | Send a `clone()` of the camera track and gate only the clone; original stays live for the self-view | Protect the peer without blacking out the present user's own preview |
+| `app/page.tsx` — mutual-presence engine | `visibilitychange`/`pagehide` detection, 500ms away-debounce, 150ms resume, 2s/4s fail-closed heartbeat, immediate-present on start, reset-on-teardown | Cut instantly, resume carefully; a dropped channel can never leak a feed |
+| `app/components/VideoPanel.tsx` | Honest "stepped away / tab inactive" overlays + away-state matrix; `peerHasBeenPresent` latch; live self-view + compact "Not shared" pill; reduced-motion beacon | The claim is "visible only while they are too"; the present user always sees themselves |
+| `lib/callsign.ts` (new) | Deterministic FNV-1a two-word "Adjective Noun" call-sign from `peerId`; disjoint 64-word lists; no collision handling | A speakable, color-blind-safe identity *paired with* peerColor; uniqueness stays the color's job |
+| `WorldMap`/`ConnectionPrompt`/`ChatPanel` — accessibility & identity | 44px keyboard-operable dots, accessible nearby-signals disclosure, map loading/coach/zero states; call-sign shown everywhere; severity-paired End controls | The core action must be keyboard-reachable; the same stranger reads the same everywhere |
+| `lib/webrtc.ts` + `ChatPanel` — typing indicator | `sendTyping()`/`onTyping` over the data channel; throttled announce + idle retract; "{call-sign} is typing…" bubble | A live sign of life with the same ephemeral, no-DB model as presence |
+
+**Total:** Reciprocal Video (clone-and-gate self-view + the mutual-presence engine and its UI) + a full UI/UX accessibility pass + the call-sign identity layer + a live typing indicator — all over the existing data channel, with **no new API route and no schema change**. Tests grew across the arc from **77 (end of Phase 3) → 98 (Reciprocal Video) → 140 passing** (the follow-ons, including the first RTL/jsdom component tests). `tsc` clean, lint clean, production build clean.
+**Risk:** Low — additive to the video/chat path, fail-closed by design, audio/chat untouched, chat-only calls unaffected; all tests green, code review APPROVE, QA no-blockers. Shipped on `feature/phase-4-privacy-shield` (PR #7).
+
+**What I'd do next (with more time):**
+- **Make the presence engine unit-testable.** Extract a *pure presence reducer* into `lib/` so the heartbeat / debounce / fail-closed gate logic can be tested without rendering the page. Today it's covered by the `setOutgoingVideoEnabled` primitive test plus manual QA; `lib/presence.ts` currently holds only the shared cadence constants, which is the natural home for the reducer.
+- **An optional window-blur trigger as a stricter sensitivity tier** (off by default to avoid the false-pause problem), for users who want the tightest possible gate.
+- **A brief first-run explainer** of *why* the video pauses, so the behavior never reads as a bug.
+- **A richer return-from-away affordance** (a clearer "they're back" moment than the feed simply resuming).
+- **Explore gaze / face-presence detection (ML)** as an honest *stronger* signal than tab focus — with the same hard honesty rule: only claim what it actually verifies.
+
+**Phase 4 deliverable:** A self-designed "make it alive *and* safe" arc — Reciprocal Video (clear video flows only while both strangers are present, enforced at the media source on a gated clone so your own self-view never goes dark, fail-closed against dropped channels), a full UI/UX accessibility pass that makes the core action keyboard-reachable, speakable color-blind-safe **call-sign** identity, and a live **typing indicator** — every piece built on the existing data channel with copy that claims exactly what it delivers, no new API, no schema change, and no regression to Phases 1–3.

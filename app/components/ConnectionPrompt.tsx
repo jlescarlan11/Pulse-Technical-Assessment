@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { peerColor } from "@/lib/peerColor";
+import { callSign } from "@/lib/callsign";
 
 // Reusable centered prompt for "someone wants to connect" and
 // "someone wants to start video".
@@ -50,6 +51,10 @@ export default function ConnectionPrompt({
 
   const accent =
     peerId !== undefined ? peerColor(peerId) : "var(--color-signal)";
+  // When we know which peer is reaching out, surface their ephemeral call-sign
+  // (a this-session signal label, not a name) so the user knows WHICH signal
+  // this is. Absent peerId -> generic prompt, no call-sign line.
+  const signLabel = peerId !== undefined ? callSign(peerId) : null;
 
   return (
     <div
@@ -91,6 +96,22 @@ export default function ConnectionPrompt({
             {variant === "video" ? <VideoIcon /> : <SignalIcon />}
           </span>
         </div>
+
+        {signLabel && (
+          // MINOR-1 — voice consistency: the "Signal" kicker keeps its small
+          // mono/uppercase LABEL voice, but the call-sign HANDLE renders as a
+          // NAME (title-case sans, font-semibold, tracking-tight) so it matches
+          // the ChatPanel header treatment — landing in chat shows the same
+          // identity in the same register, not two different ones.
+          <div className="mb-3">
+            <p className="font-mono text-[10px] uppercase tracking-[0.18em] text-haze-400">
+              Signal
+            </p>
+            <p className="mt-0.5 font-semibold tracking-tight text-haze-100">
+              {signLabel}
+            </p>
+          </div>
+        )}
 
         <h2 className="text-xl font-semibold tracking-tight text-haze-50">
           {title}

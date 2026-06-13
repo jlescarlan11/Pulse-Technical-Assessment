@@ -1,13 +1,22 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { peerColor } from "@/lib/peerColor";
+import { callSign } from "@/lib/callsign";
 
 export interface ChatMessage {
   id: number;
   mine: boolean;
   text: string;
 }
+
+// Throttle for outbound onTyping(true): once we've told the peer we're typing
+// we hold off re-announcing for this long, so a burst of keystrokes is a single
+// signal rather than one per key.
+const TYPING_THROTTLE_MS = 1500;
+// Idle window: if no keystroke lands within this long, we tell the peer we've
+// stopped typing.
+const TYPING_IDLE_MS = 2500;
 
 export default function ChatPanel({
   messages,
@@ -17,6 +26,8 @@ export default function ChatPanel({
   onStartVideo,
   onEnd,
   peerId,
+  peerTyping,
+  onTyping,
 }: {
   messages: ChatMessage[];
   connected: boolean;
@@ -25,17 +36,39 @@ export default function ChatPanel({
   onStartVideo: () => void;
   onEnd: () => void;
   peerId?: string;
+  /** true while the stranger is composing a message. */
+  peerTyping: boolean;
+  /** Tell the peer we started (true) or stopped (false) typing. */
+  onTyping: (isTyping: boolean) => void;
 }) {
   const [draft, setDraft] = useState("");
   const [slowConnect, setSlowConnect] = useState(false);
   const listRef = useRef<HTMLDivElement>(null);
 
+  // Outbound-typing bookkeeping, all in refs so the throttle/idle logic never
+  // triggers a re-render:
+  //   - lastTrueAt: when we last fired onTyping(true), for the throttle.
+  //   - idleTimer:  the pending onTyping(false) fired after a typing pause.
+  //   - sentTrue:   whether the peer currently believes we're typing, so we
+  //                 don't spam matching onTyping(false) calls.
+  //   - onTypingRef: latest onTyping, so the stable callbacks below can call it
+  //                 without re-subscribing to every prop change.
+  const lastTrueAt = useRef(0);
+  const idleTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sentTrue = useRef(false);
+  const onTypingRef = useRef(onTyping);
+  useEffect(() => {
+    onTypingRef.current = onTyping;
+  }, [onTyping]);
+
   // Keep the latest message in view by scrolling the list itself — never the
-  // page — so the drawer can't shift the surrounding layout.
+  // page — so the drawer can't shift the surrounding layout. The typing
+  // indicator is part of the same scroll container, so it re-runs when the
+  // peer starts/stops typing too and the bubble stays visible.
   useEffect(() => {
     const el = listRef.current;
     if (el) el.scrollTo({ top: el.scrollHeight, behavior: "smooth" });
-  }, [messages]);
+  }, [messages, peerTyping, connected]);
 
   // If the channel hasn't opened after a few seconds, surface a gentle
   // "taking longer" hint so the connecting state is never a silent dead end.
@@ -48,16 +81,77 @@ export default function ChatPanel({
     return () => clearTimeout(t);
   }, [connected]);
 
+  // Stop the idle timer and, if the peer thinks we're typing, retract it.
+  // Used on submit, when the draft empties, when the connection drops, and on
+  // unmount. Reads onTyping via the ref so it's stable across renders.
+  const stopTyping = useCallback(() => {
+    if (idleTimer.current) {
+      clearTimeout(idleTimer.current);
+      idleTimer.current = null;
+    }
+    if (sentTrue.current) {
+      sentTrue.current = false;
+      onTypingRef.current(false);
+    }
+    lastTrueAt.current = 0;
+  }, []);
+
+  // Clean up timers on unmount and tell the peer we're no longer typing.
+  useEffect(() => {
+    return () => stopTyping();
+  }, [stopTyping]);
+
+  function onDraftChange(next: string) {
+    setDraft(next);
+
+    // Never announce typing when there's no open channel to carry it.
+    if (!connected) return;
+
+    if (next.trim() === "") {
+      // Cleared the field — retract any in-flight "typing" immediately.
+      stopTyping();
+      return;
+    }
+
+    // Throttle the outbound true: only re-announce if it's been a while since
+    // the last one (or we've never announced this run).
+    const now = Date.now();
+    if (!sentTrue.current || now - lastTrueAt.current >= TYPING_THROTTLE_MS) {
+      sentTrue.current = true;
+      lastTrueAt.current = now;
+      onTyping(true);
+    }
+
+    // (Re)start the idle countdown — a pause longer than the window retracts.
+    if (idleTimer.current) clearTimeout(idleTimer.current);
+    idleTimer.current = setTimeout(() => {
+      idleTimer.current = null;
+      if (sentTrue.current) {
+        sentTrue.current = false;
+        onTypingRef.current(false);
+      }
+      lastTrueAt.current = 0;
+    }, TYPING_IDLE_MS);
+  }
+
   function submit(e: React.FormEvent) {
     e.preventDefault();
     const text = draft.trim();
     if (!text || !connected) return;
     onSend(text);
     setDraft("");
+    // The message is on its way — we're no longer "typing".
+    stopTyping();
   }
 
   const accent =
     peerId !== undefined ? peerColor(peerId) : "var(--color-signal)";
+  // The peer's ephemeral call-sign (this-session signal label, not a name).
+  // Falls back to the neutral "Stranger" when there's no peer id yet.
+  const signLabel = peerId !== undefined ? callSign(peerId) : "Stranger";
+
+  // The incoming typing bubble only makes sense on a live channel.
+  const showTyping = peerTyping && connected;
 
   return (
     <div className="animate-slide-in glass absolute inset-y-0 right-0 z-30 flex w-full max-w-md flex-col border-0 border-l text-haze-50">
@@ -83,7 +177,9 @@ export default function ChatPanel({
             </svg>
           </span>
           <div>
-            <p className="font-semibold leading-tight tracking-tight">Stranger</p>
+            <p className="truncate font-semibold leading-tight tracking-tight">
+              {signLabel}
+            </p>
             <p className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-haze-400">
               <span
                 className={`inline-block h-1.5 w-1.5 rounded-full ${
@@ -110,37 +206,91 @@ export default function ChatPanel({
               <path d="M15 10.5l5-2.8v8.6l-5-2.8" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
             </svg>
           </button>
+          {/* Danger pair (Story 3 AC1): "End chat" is the GREATER end-action —
+              it ends the whole conversation. It deliberately reads as the
+              heavier sibling of VideoPanel's lesser "End video" (which only
+              drops the video and keeps the chat). Label is "End chat" rather
+              than the ambiguous "End"; the compact px-3.5/h-9 treatment keeps
+              it legible without a fixed width. */}
           <button
             onClick={onEnd}
             title="End conversation"
-            className="flex h-9 items-center gap-1.5 rounded-full bg-danger/15 px-3.5 text-sm font-medium text-danger-400 transition hover:bg-danger hover:text-white active:scale-95"
+            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full bg-danger/15 px-3.5 text-sm font-medium text-danger-400 transition hover:bg-danger hover:text-white active:scale-95"
           >
-            End
+            End chat
           </button>
         </div>
       </header>
 
       {/* Messages */}
       <div ref={listRef} className="flex-1 space-y-2.5 overflow-y-auto px-4 py-5">
-        {messages.length === 0 && (
-          <div className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-signal">
-              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path
-                  d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </span>
-            <p className="text-sm font-medium text-haze-200">Say hello.</p>
-            <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
-              Messages travel peer-to-peer and are never stored. When the tab
-              closes, the conversation is gone.
-            </p>
-          </div>
-        )}
+        {/* FIX 3 (M4) — the empty message area has two distinct calm states so
+            the body never contradicts the composer:
+              - NOT connected (handshake): a quiet connecting-specific state
+                that matches the header "Connecting…/Still connecting…" status
+                and the disabled "Connecting…" composer. No "Say hello." while
+                you can't type yet.
+              - connected, no messages: the real "Say hello." empty state.
+            Both are gated on messages.length === 0. aria-live=polite so a
+            screen reader hears the body settle from connecting to ready without
+            stealing focus; reduced-motion users get the same static layout
+            (globals.css collapses the fade).
+
+            PHASE-4 REFINEMENT — when the thread is still empty AND the peer has
+            started composing the very first message (showTyping), the big
+            centred "Say hello." block yields to the typing indicator below so
+            the two don't compete for space. The connected empty state is gated
+            on !showTyping for exactly that reason; the bubble then reads
+            naturally as the stranger writing the opener. The NOT-connected
+            connecting body is unaffected (showTyping is false while
+            disconnected). */}
+        {messages.length === 0 &&
+          (connected ? (
+            !showTyping && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center"
+              >
+                <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-signal">
+                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </span>
+                <p className="text-sm font-medium text-haze-200">Say hello.</p>
+                <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
+                  Messages travel peer-to-peer and are never stored. When the tab
+                  closes, the conversation is gone.
+                </p>
+              </div>
+            )
+          ) : (
+            <div
+              role="status"
+              aria-live="polite"
+              className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center"
+            >
+              {/* Quiet connecting state: a steady haze dot (icon + text, not
+                  colour alone) that mirrors the header status. The pulse is
+                  animate-pulse, which globals.css holds steady at full opacity
+                  under prefers-reduced-motion. */}
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-haze-300">
+                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-haze-400" />
+              </span>
+              <p className="text-sm font-medium text-haze-300">
+                {slowConnect ? "Still connecting…" : "Connecting…"}
+              </p>
+              <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
+                Opening a private peer-to-peer channel. You can send a signal
+                once it’s ready.
+              </p>
+            </div>
+          ))}
         {messages.map((m) => (
           <div
             key={m.id}
@@ -157,13 +307,54 @@ export default function ChatPanel({
             </span>
           </div>
         ))}
+
+        {/* Incoming typing indicator — a transient peer "message" pinned to the
+            bottom of the list. It has NO message id (it isn't a real message),
+            reuses the incoming-bubble shape (hairline / ink / flattened
+            bottom-left), and carries three breathing dots in the peer's colour
+            plus the call-sign line. role="status" + aria-live="polite" lets a
+            screen reader announce that the peer is typing without stealing
+            focus; the dots are aria-hidden so only the text conveys meaning.
+            The dots use animate-pulse, which globals.css freezes at full
+            opacity under prefers-reduced-motion (so they render as static
+            dots). The staggered animationDelay gives a gentle wave when motion
+            is allowed.
+
+            When the thread is otherwise empty this bubble is the sole body
+            content (the "Say hello." empty state yields to it above), so it
+            still scrolls into view via the messages/peerTyping effect. */}
+        {showTyping && (
+          <div
+            role="status"
+            aria-live="polite"
+            className="animate-msg-in flex justify-start"
+          >
+            <span className="hairline flex max-w-[80%] items-center gap-2 rounded-2xl rounded-bl-md border bg-ink-750/80 px-3.5 py-2.5">
+              <span className="flex items-center gap-1" aria-hidden>
+                {[0, 1, 2].map((i) => (
+                  <span
+                    key={i}
+                    className="inline-block h-1.5 w-1.5 animate-pulse rounded-full"
+                    style={{
+                      backgroundColor: accent,
+                      animationDelay: `${i * 180}ms`,
+                    }}
+                  />
+                ))}
+              </span>
+              <span className="text-xs leading-none text-haze-300">
+                {signLabel} is typing…
+              </span>
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Composer */}
       <form onSubmit={submit} className="hairline flex gap-2 border-t p-3">
         <input
           value={draft}
-          onChange={(e) => setDraft(e.target.value)}
+          onChange={(e) => onDraftChange(e.target.value)}
           placeholder={connected ? "Send a signal…" : "Connecting…"}
           disabled={!connected}
           className="flex-1 rounded-full border border-haze-200/10 bg-ink-900/70 px-4 py-2.5 text-sm text-haze-50 outline-none transition placeholder:text-haze-500 focus:border-signal/40 disabled:opacity-50"
