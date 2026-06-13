@@ -3,7 +3,13 @@ export type PeerControl =
   | "video-request"
   | "video-accept"
   | "video-decline"
-  | "video-end";
+  | "video-end"
+  // Phase 4 "Reciprocal Video" presence shield. Sent over the existing data
+  // channel via sendControl(). "presence-present" doubles as the periodic
+  // heartbeat (fail-closed: a peer is treated as away until one arrives and if
+  // they stop arriving); "presence-away" is the explicit instant cut.
+  | "presence-present"
+  | "presence-away";
 
 export interface TurnCredentialsResponse {
   urls: string[];
@@ -251,6 +257,30 @@ export class PeerSession {
       }
     }
     return this.localStream;
+  }
+
+  // Gate the OUTGOING video: the protective core of the Phase 4 presence shield.
+  // Setting track.enabled = false makes the sender transmit black frames while
+  // audio keeps flowing, so no clear video reaches the peer unless both sides
+  // are present. This is intentionally the reliable primitive: a CSS/canvas
+  // blur cannot run while the local tab is hidden (requestAnimationFrame is
+  // throttled/paused in background tabs), whereas track.enabled is enforced by
+  // the media pipeline regardless of tab state. Toggling .enabled does NOT
+  // require renegotiation. No-op-safe before any video track exists. Note this
+  // also blacks the local self-view while disabled (expected; the UI signals
+  // the away state). We flip both the local MediaStreamTrack and the matching
+  // RTCRtpSender track so the gate holds no matter which one the UI reads.
+  setOutgoingVideoEnabled(enabled: boolean): void {
+    if (this.localStream) {
+      for (const track of this.localStream.getVideoTracks()) {
+        track.enabled = enabled;
+      }
+    }
+    for (const sender of this.pc.getSenders()) {
+      if (sender.track && sender.track.kind === "video") {
+        sender.track.enabled = enabled;
+      }
+    }
   }
 
   stopVideo() {
