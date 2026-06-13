@@ -1,3 +1,5 @@
+import { parseFingerprint } from "./sas";
+
 export type DescType = "offer" | "answer" | "ice";
 export type PeerControl =
   | "video-request"
@@ -279,5 +281,22 @@ export class PeerSession {
     try {
       this.pc.close();
     } catch {}
+  }
+
+  // DTLS fingerprints for SAS verification. Both peers derive a phrase from
+  // BOTH fingerprints (see lib/sas.ts) to detect a relay that swapped one to
+  // MITM the connection. The fingerprint is the certificate identity fixed when
+  // setLocalDescription/setRemoteDescription run at offer/answer; it is stable
+  // across track renegotiation (adding/removing video uses the same DTLS cert),
+  // so reading it any time after the descriptions are set is safe. Returns null
+  // for either side whose description is not yet available (verification not
+  // ready) or whose SDP carries no fingerprint line.
+  getFingerprints(): { local: string | null; remote: string | null } {
+    const localSdp = this.pc.localDescription?.sdp;
+    const remoteSdp = this.pc.remoteDescription?.sdp;
+    return {
+      local: localSdp ? parseFingerprint(localSdp) : null,
+      remote: remoteSdp ? parseFingerprint(remoteSdp) : null,
+    };
   }
 }
