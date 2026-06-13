@@ -79,6 +79,13 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # 3a. Generate the Prisma client BEFORE typecheck/test/build. lib/prisma.ts
+      # imports `PrismaClient` from `@prisma/client`, which only exports it after
+      # generation — without this, `tsc` sees no PrismaClient and the prisma-typed
+      # code collapses to `any`. Needs NO database connection.
+      - name: Generate Prisma client
+        run: npx prisma generate
+
       # 4. Lint
       - name: Lint
         run: npm run lint
