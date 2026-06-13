@@ -25,9 +25,28 @@ const ICE_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
-export async function buildICEConfig(): Promise<RTCConfiguration> {
+// Fetches short-lived ICE (STUN+TURN) credentials from the coordination API.
+// The backend now requires the session id + capability token as query params
+// and returns 401 without a valid token; on any failure we fall back to
+// STUN-only (Google) so same-network/easy-NAT calls still work.
+//
+// NOTE: the backend issues TURN credentials with a 600s (10 min) TTL. For
+// calls longer than the TTL the relayed candidates expire. A full ICE-restart
+// refresh is out of scope for this phase (stakeholder ruling); a long-lived
+// active call should re-fetch creds before expiry. TODO(phase-4): refresh ICE
+// servers ~30s before the 600s TTL elapses and renegotiate.
+export async function buildICEConfig(
+  id?: string,
+  token?: string,
+): Promise<RTCConfiguration> {
   try {
-    const response = await fetch("/api/turn-credentials", {
+    // Only append id/token when both are present so the credential-less call
+    // path (and existing unit tests) hit the bare endpoint unchanged.
+    const url =
+      id && token
+        ? `/api/turn-credentials?id=${encodeURIComponent(id)}&token=${encodeURIComponent(token)}`
+        : "/api/turn-credentials";
+    const response = await fetch(url, {
       method: "GET",
       signal: AbortSignal.timeout(5000),
     });

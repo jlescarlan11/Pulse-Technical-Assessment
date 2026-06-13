@@ -6,10 +6,10 @@ import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
-import { join, leave, poll, sendSignal } from "@/lib/api";
+import { join, leave, poll, sendSignal, UnauthorizedError } from "@/lib/api";
 import { PeerSession, buildICEConfig, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
-import { type PeerDot, type SignalMsg } from "@/lib/types";
+import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 
 type Conn =
   | { kind: "idle" }
@@ -25,6 +25,11 @@ const REQUEST_TIMEOUT_MS = 30_000;
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
   const [sessionId] = useState(() => crypto.randomUUID());
+  // Per-session capability token issued by /api/join. Held in a ref (not state)
+  // because it must be readable synchronously inside the poll interval, every
+  // signal sender, and the pagehide/beforeunload leave handler — none of which
+  // should re-run when it rotates. Mirrors sessionId's session-long lifetime.
+  const tokenRef = useRef<string | null>(null);
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
@@ -51,6 +56,25 @@ export default function Home() {
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Last known location, kept in a ref so a token-refresh re-join (triggered by
+  // a 401) can re-register presence with the same coordinates.
+  const locationRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  // Re-mint a fresh capability token by re-joining. Called when a poll/signal
+  // comes back 401 (token invalid/expired/rotated). Re-joining rotates the
+  // token server-side, so we always store the newest value. Returns the new
+  // token, or null if we couldn't recover (no known location / join failed).
+  async function refreshToken(): Promise<string | null> {
+    const loc = locationRef.current;
+    if (!loc) return null;
+    try {
+      const { token } = await join(sessionId, loc.lat, loc.lng);
+      tokenRef.current = token;
+      return token;
+    } catch {
+      return null;
+    }
+  }
 
   function showNotice(text: string) {
     setNotice(text);
@@ -59,6 +83,30 @@ export default function Home() {
 
   function addMessage(mine: boolean, text: string) {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
+  }
+
+  // Token-aware signal sender. Pulls the current token from the ref, and on a
+  // 401 re-mints it once and retries so a rotated/expired token doesn't drop
+  // the message silently.
+  async function emitSignal(
+    toId: string,
+    type: SignalType,
+    payload?: string,
+  ): Promise<void> {
+    const token = tokenRef.current;
+    if (!token) return;
+    try {
+      await sendSignal(sessionId, toId, type, token, payload);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        const fresh = await refreshToken();
+        if (fresh) {
+          try {
+            await sendSignal(sessionId, toId, type, fresh, payload);
+          } catch {}
+        }
+      }
+    }
   }
 
   function teardown(message?: string) {
@@ -75,12 +123,15 @@ export default function Home() {
 
   async function startPeer(peerId: string, initiator: boolean) {
     try {
-      const iceConfig = await buildICEConfig();
+      const iceConfig = await buildICEConfig(
+        sessionId,
+        tokenRef.current ?? undefined,
+      );
       const ps = new PeerSession(
         initiator,
         {
           onSignal: (type: DescType, payload: string) => {
-            void sendSignal(sessionId, peerId, type, payload);
+            void emitSignal(peerId, type, payload);
           },
           onChat: (text) => addMessage(false, text),
           onControl: (ctrl) => handleControl(ctrl),
@@ -140,13 +191,13 @@ export default function Home() {
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
     setConn({ kind: "requesting", peerId });
-    void sendSignal(sessionId, peerId, "request");
+    void emitSignal(peerId, "request");
     requestTimer.current = setTimeout(() => {
       if (
         connRef.current.kind === "requesting" &&
         connRef.current.peerId === peerId
       ) {
-        void sendSignal(sessionId, peerId, "end");
+        void emitSignal(peerId, "end");
         teardown("No answer.");
       }
     }, REQUEST_TIMEOUT_MS);
@@ -154,7 +205,7 @@ export default function Home() {
 
   function cancelRequest() {
     if (connRef.current.kind === "requesting") {
-      void sendSignal(sessionId, connRef.current.peerId, "end");
+      void emitSignal(connRef.current.peerId, "end");
     }
     teardown();
   }
@@ -163,20 +214,20 @@ export default function Home() {
     if (connRef.current.kind !== "incoming") return;
     const peerId = connRef.current.peerId;
     void startPeer(peerId, false);
-    void sendSignal(sessionId, peerId, "accept");
+    void emitSignal(peerId, "accept");
     setConn({ kind: "connecting", peerId });
   }
 
   function declineIncoming() {
     if (connRef.current.kind !== "incoming") return;
-    void sendSignal(sessionId, connRef.current.peerId, "decline");
+    void emitSignal(connRef.current.peerId, "decline");
     setConn({ kind: "idle" });
   }
 
   function endConnection() {
     const c = connRef.current;
     if (c.kind === "connecting" || c.kind === "connected") {
-      void sendSignal(sessionId, c.peerId, "end");
+      void emitSignal(c.peerId, "end");
     }
     teardown();
   }
@@ -223,7 +274,7 @@ export default function Home() {
         if (connRef.current.kind === "idle") {
           setConn({ kind: "incoming", peerId: sig.fromId });
         } else {
-          void sendSignal(sessionId, sig.fromId, "decline");
+          void emitSignal(sig.fromId, "decline");
         }
         break;
       }
@@ -279,19 +330,65 @@ export default function Home() {
     processSignalRef.current = processSignal;
   });
 
+  // refreshToken closes over sessionId (stable) but is recreated each render;
+  // read it through a ref inside the poll interval so the effect deps stay
+  // honest and the interval isn't torn down/recreated needlessly.
+  const refreshTokenRef = useRef(refreshToken);
+  useEffect(() => {
+    refreshTokenRef.current = refreshToken;
+  });
+
   useEffect(() => {
     if (phase !== "live" || !sessionId) return;
     let active = true;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    // Bound the recovery path. A persistent 401 (e.g. the presence row was
+    // reaped, or two tabs share a sessionId and fight over rotate-on-join) must
+    // not become an unbounded join+poll stream. Back off exponentially on
+    // consecutive auth failures and give up at a ceiling, surfacing a reconnect
+    // instead of hammering the API forever.
+    let authFailures = 0;
+    const MAX_AUTH_FAILURES = 5;
+    const MAX_BACKOFF_MS = 30_000;
+
+    const schedule = (delay: number) => {
+      if (active) timer = setTimeout(tick, delay);
+    };
+
+    const onAuthFailure = async () => {
+      authFailures += 1;
+      if (authFailures >= MAX_AUTH_FAILURES) {
+        // Stop the loop — no reschedule.
+        setNotice("Session expired. Reload the page to reconnect.");
+        return;
+      }
+      await refreshTokenRef.current();
+      schedule(Math.min(POLL_INTERVAL_MS * 2 ** authFailures, MAX_BACKOFF_MS));
+    };
 
     const tick = async () => {
       try {
-        const data = await poll(sessionId);
+        const token = tokenRef.current;
+        if (!token) {
+          // No token yet (or it was cleared); recover before polling.
+          await onAuthFailure();
+          return;
+        }
+        const data = await poll(sessionId, token);
         if (!active) return;
+        authFailures = 0; // a clean poll clears the backoff
         setPeers(data.peers);
         for (const s of data.signals) processSignalRef.current(s);
-      } catch {}
-      if (active) timer = setTimeout(tick, POLL_INTERVAL_MS);
+      } catch (err) {
+        if (err instanceof UnauthorizedError) {
+          // Token rotated/expired → re-mint, back off, give up at the ceiling.
+          await onAuthFailure();
+          return;
+        }
+        // Any other error (network blip, 429) retries at the normal cadence
+        // without counting against the auth-failure ceiling.
+      }
+      schedule(POLL_INTERVAL_MS);
     };
     tick();
 
@@ -303,7 +400,10 @@ export default function Home() {
 
   useEffect(() => {
     if (!sessionId || phase !== "live") return;
-    const onLeave = () => leave(sessionId);
+    const onLeave = () => {
+      const token = tokenRef.current;
+      if (token) leave(sessionId, token);
+    };
     window.addEventListener("pagehide", onLeave);
     window.addEventListener("beforeunload", onLeave);
     return () => {
@@ -314,7 +414,9 @@ export default function Home() {
 
   async function handleReady(lat: number, lng: number) {
     setMyLocation({ lat, lng });
-    await join(sessionId, lat, lng);
+    locationRef.current = { lat, lng };
+    const { token } = await join(sessionId, lat, lng);
+    tokenRef.current = token;
     setPhase("live");
   }
 

@@ -1,0 +1,120 @@
+# ---------------------------------------------------------------------------
+# Pulse — Continuous Integration (CI only)
+# ---------------------------------------------------------------------------
+# What this does:
+#   Runs lint, typecheck, tests, and a production build on every push and PR,
+#   plus a separate NON-BLOCKING dependency audit so CVEs stay visible.
+#
+# What this intentionally does NOT do:
+#   No deploy / CD. Deployment stays on Vercel's native GitHub integration.
+#   Do not add a deploy job here.
+#
+# Lockfile note:
+#   package-lock.json IS committed and git-tracked, so we use `npm ci`
+#   (clean, reproducible install) and enable actions/setup-node's npm cache,
+#   which keys off the lockfile. If the lockfile were ever removed, switch the
+#   install to `npm install --no-audit --no-fund` and DROP the `cache:` line
+#   below (the cache key requires a lockfile and would otherwise break).
+#
+# Build-time env note:
+#   `npm run build` is `npx prisma generate && next build`.
+#     - `prisma generate` needs NO database connection.
+#     - `next build` runs `tsc` AND collects page/route data. lib/prisma.ts
+#       instantiates the Prisma client at module load and THROWS if
+#       DATABASE_URL is unset, so the build needs a DATABASE_URL present even
+#       though CI never connects to a real database. We pass a harmless dummy.
+#     - NEXT_PUBLIC_MAPBOX_TOKEN has a code-level fallback but we stub a dummy
+#       so the build is deterministic and free of token-related warnings.
+#   These dummies are NOT secrets and are safe to keep in the workflow. Real
+#   values live in Vercel project settings and are used at deploy/runtime only.
+#   Never hardcode a real secret here.
+# ---------------------------------------------------------------------------
+
+name: CI
+
+on:
+  push:
+  pull_request:
+
+# Cancel an in-progress run when a newer commit is pushed to the same branch/PR.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least-privilege: CI only needs to read the repo.
+permissions:
+  contents: read
+
+env:
+  # Node 20 is the floor required by Next 16 (next engines: ">=20.9.0").
+  # No engines field / .nvmrc in the repo, so we pin a known-good LTS here.
+  NODE_VERSION: "20"
+
+jobs:
+  # -------------------------------------------------------------------------
+  # Primary gate: lint -> typecheck -> test -> build. Any failure fails CI.
+  # -------------------------------------------------------------------------
+  build:
+    name: Lint, Typecheck, Test, Build
+    runs-on: ubuntu-latest
+
+    # Dummy, non-secret build-time env. See "Build-time env note" above.
+    env:
+      DATABASE_URL: "postgresql://ci:ci@localhost:5432/ci?schema=public"
+      NEXT_PUBLIC_MAPBOX_TOKEN: "pk.ci_dummy_build_token"
+
+    steps:
+      # 1. Checkout
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # 2. Setup Node (npm cache enabled because the lockfile is committed).
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # 3. Install dependencies from the committed lockfile (reproducible).
+      - name: Install dependencies
+        run: npm ci
+
+      # 4. Lint
+      - name: Lint
+        run: npm run lint
+
+      # 5. Typecheck
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      # 6. Test
+      - name: Test
+        run: npm test
+
+      # 7. Build (prisma generate + next build) using the dummy env above.
+      - name: Build
+        run: npm run build
+
+  # -------------------------------------------------------------------------
+  # Non-blocking security visibility: surfaces dependency CVEs but never
+  # blocks merge (continue-on-error). We do NOT run `npm audit fix --force`.
+  # -------------------------------------------------------------------------
+  audit:
+    name: Dependency Audit (non-blocking)
+    runs-on: ubuntu-latest
+    continue-on-error: true
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      # Report moderate-and-above advisories. Exit code is ignored by the
+      # job (continue-on-error) so findings are visible without gating merge.
+      - name: npm audit
+        run: npm audit --audit-level=moderate

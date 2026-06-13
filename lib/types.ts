@@ -30,3 +30,11 @@ export interface PollResponse {
   peers: PeerDot[];
   signals: SignalMsg[];
 }
+
+// Returned by POST /api/join. The `token` is the server-issued capability secret
+// for this session — the client must keep it and present it on every subsequent
+// poll/leave/signal/turn-credentials call. It is returned exactly once, here.
+export interface JoinResponse {
+  ok: true;
+  token: string;
+}
