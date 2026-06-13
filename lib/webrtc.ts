@@ -22,6 +22,10 @@ interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
   onControl: (ctrl: PeerControl) => void;
+  // Phase 4 typing indicator. Fired when the peer's typing state flips. Rides
+  // the existing data channel via a {t:"typing", on} message — fully ephemeral,
+  // never stored (consistent with the app's no-persistence privacy model).
+  onTyping: (isTyping: boolean) => void;
   onRemoteStream: (stream: MediaStream | null) => void;
   onConnectionState: (state: RTCPeerConnectionState) => void;
   onChannelOpen: () => void;
@@ -184,6 +188,8 @@ export class PeerSession {
           this.cb.onChat(msg.text);
         } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
           this.cb.onControl(msg.ctrl as PeerControl);
+        } else if (msg.t === "typing" && typeof msg.on === "boolean") {
+          this.cb.onTyping(msg.on);
         }
       } catch {}
     };
@@ -245,6 +251,13 @@ export class PeerSession {
 
   sendControl(ctrl: PeerControl) {
     this.safeSend({ t: "ctrl", ctrl });
+  }
+
+  // Phase 4 typing indicator. Broadcasts the local typing state to the peer
+  // over the existing data channel. safeSend() no-ops if the channel isn't
+  // open, so this is safe to call at any point in the session lifecycle.
+  sendTyping(on: boolean): void {
+    this.safeSend({ t: "typing", on });
   }
 
   private safeSend(obj: unknown) {

@@ -45,6 +45,11 @@ export default function Home() {
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
+  // Phase 4 typing indicator. True while the peer is composing a message.
+  // Ephemeral peer-driven UI flag: set straight from the data-channel callback
+  // (onTyping), cleared on a real inbound message and on teardown. No ref mirror
+  // needed — it is only read in render, never inside an interval or callback.
+  const [peerTyping, setPeerTyping] = useState(false);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
@@ -191,6 +196,7 @@ export default function Home() {
     setRemoteStream(null);
     setVideo("none");
     resetPresence();
+    setPeerTyping(false);
     setMessages([]);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
@@ -208,8 +214,13 @@ export default function Home() {
           onSignal: (type: DescType, payload: string) => {
             void emitSignal(peerId, type, payload);
           },
-          onChat: (text) => addMessage(false, text),
+          onChat: (text) => {
+            // A real message means they have stopped typing.
+            setPeerTyping(false);
+            addMessage(false, text);
+          },
           onControl: (ctrl) => handleControl(ctrl),
+          onTyping: (on) => setPeerTyping(on),
           onRemoteStream: (stream) => setRemoteStream(stream),
           onConnectionState: (state) => {
             if (state === "failed") {
@@ -756,6 +767,8 @@ export default function Home() {
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
           peerId={activePeerId}
+          peerTyping={peerTyping}
+          onTyping={(on: boolean) => peerRef.current?.sendTyping(on)}
         />
       )}
 

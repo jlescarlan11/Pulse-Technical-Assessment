@@ -90,6 +90,7 @@ const noopCallbacks = {
   onSignal: () => {},
   onChat: () => {},
   onControl: () => {},
+  onTyping: () => {},
   onRemoteStream: () => {},
   onConnectionState: () => {},
   onChannelOpen: () => {},
@@ -238,5 +239,113 @@ describe("PeerSession.setOutgoingVideoEnabled (presence shield core)", () => {
     expect(audio.stop).toHaveBeenCalledTimes(1);
     // ... and the sent clone is stopped too (it holds its own camera handle).
     expect(clone.stop).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// FINDING 1: inbound typing data-channel branch (dc.onmessage -> onTyping)
+// ---------------------------------------------------------------------------
+//
+// wireDataChannel installs dc.onmessage, which JSON-parses each incoming
+// message and, for {t:"typing", on:boolean}, calls cb.onTyping(msg.on) — all
+// inside a try/catch and guarded by `typeof msg.on === "boolean"`. The fakes
+// above never exercised that branch (no message ever arrives on the channel).
+//
+// To drive it we need a handle on the SAME data-channel object PeerSession
+// wired. The base fake's createDataChannel() returns a fresh throwaway object
+// each call, so here we use a tiny subclass that (a) gives the channel a
+// typed `onmessage` slot and (b) captures the channel instance it created, so
+// the test can fire onmessage exactly as the browser would (event with a
+// `.data` JSON string). We only touch the test file; source is unchanged.
+
+type FakeDataChannel = {
+  readyState: string;
+  send: jest.Mock;
+  close: jest.Mock;
+  onmessage: ((e: { data: string }) => void) | null;
+};
+
+class TypingFakeRTCPeerConnection extends FakeRTCPeerConnection {
+  // The most recently created data channel — the one PeerSession wired its
+  // onmessage handler onto (initiator path calls createDataChannel in ctor).
+  lastChannel: FakeDataChannel | null = null;
+
+  override createDataChannel() {
+    const channel: FakeDataChannel = {
+      readyState: "connecting",
+      send: jest.fn(),
+      close: jest.fn(),
+      onmessage: null,
+    };
+    this.lastChannel = channel;
+    return channel as unknown as ReturnType<
+      FakeRTCPeerConnection["createDataChannel"]
+    >;
+  }
+}
+
+/**
+ * Build an initiator PeerSession over the typing-aware fake pc and return the
+ * onTyping spy together with the wired data channel. The session is the
+ * initiator so the channel is created synchronously in the constructor and
+ * wireDataChannel has already installed onmessage by the time we read it.
+ */
+function sessionWithChannel(onTyping: jest.Mock) {
+  (global as Record<string, unknown>).RTCPeerConnection =
+    TypingFakeRTCPeerConnection;
+  (global as Record<string, unknown>).navigator = {
+    mediaDevices: { getUserMedia: jest.fn() },
+  };
+  const ps = new PeerSession(true, { ...noopCallbacks, onTyping });
+  // The pc is private, but we created it via the fake; grab the instance off
+  // the session through the only public surface we have: re-read the global's
+  // last constructed pc. Simpler: the fake stored lastChannel on the instance,
+  // and PeerSession holds that instance — so reach it via a fresh reference.
+  const pc = (ps as unknown as { pc: TypingFakeRTCPeerConnection }).pc;
+  const channel = pc.lastChannel;
+  if (!channel || !channel.onmessage) {
+    throw new Error("expected the initiator channel to have onmessage wired");
+  }
+  return { ps, channel, onTyping };
+}
+
+/** Deliver a raw payload exactly as the browser does: an event with `.data`. */
+function deliver(channel: FakeDataChannel, data: string) {
+  channel.onmessage!({ data });
+}
+
+describe("PeerSession inbound typing (data-channel onmessage)", () => {
+  it("dispatches onTyping(true) then onTyping(false) for valid typing messages", () => {
+    const onTyping = jest.fn();
+    const { channel } = sessionWithChannel(onTyping);
+
+    deliver(channel, JSON.stringify({ t: "typing", on: true }));
+    deliver(channel, JSON.stringify({ t: "typing", on: false }));
+
+    expect(onTyping).toHaveBeenCalledTimes(2);
+    expect(onTyping).toHaveBeenNthCalledWith(1, true);
+    expect(onTyping).toHaveBeenNthCalledWith(2, false);
+  });
+
+  it("ignores a typing message whose `on` is not a boolean (guard holds)", () => {
+    const onTyping = jest.fn();
+    const { channel } = sessionWithChannel(onTyping);
+
+    // `on:"yes"` is truthy but not a boolean — the typeof guard must reject it
+    // so a malformed peer can't toggle our indicator with arbitrary payloads.
+    expect(() =>
+      deliver(channel, JSON.stringify({ t: "typing", on: "yes" })),
+    ).not.toThrow();
+    expect(onTyping).not.toHaveBeenCalled();
+  });
+
+  it("swallows non-JSON garbage on the channel without throwing or dispatching", () => {
+    const onTyping = jest.fn();
+    const { channel } = sessionWithChannel(onTyping);
+
+    // JSON.parse throws on this; the try/catch must absorb it so a noisy or
+    // hostile channel can never crash the session.
+    expect(() => deliver(channel, "not json at all {{{")).not.toThrow();
+    expect(onTyping).not.toHaveBeenCalled();
   });
 });
