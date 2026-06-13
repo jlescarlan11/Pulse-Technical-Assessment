@@ -5,6 +5,13 @@ export type PeerControl =
   | "video-decline"
   | "video-end";
 
+export interface TurnCredentialsResponse {
+  urls: string[];
+  username?: string;
+  credential?: string;
+  error?: string;
+}
+
 interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
@@ -18,6 +25,59 @@ const ICE_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
+export async function buildICEConfig(): Promise<RTCConfiguration> {
+  try {
+    const response = await fetch("/api/turn-credentials", {
+      method: "GET",
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      console.warn(`TURN fetch failed: HTTP ${response.status}`);
+      return ICE_CONFIG;
+    }
+
+    const data = (await response.json()) as TurnCredentialsResponse;
+
+    if (data.error) {
+      console.warn(`TURN error: ${data.error}`);
+      return ICE_CONFIG;
+    }
+
+    if (!data.urls || !Array.isArray(data.urls) || data.urls.length === 0) {
+      console.warn("TURN: missing or empty urls");
+      return ICE_CONFIG;
+    }
+
+    if (!data.username || !data.credential) {
+      console.warn("TURN: missing username or credential");
+      return ICE_CONFIG;
+    }
+
+    return {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        {
+          urls: data.urls,
+          username: data.username,
+          credential: data.credential,
+        },
+      ],
+    };
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.name === "AbortError" || error.message.includes("aborted")) {
+        console.warn("TURN fetch timeout");
+      } else {
+        console.warn(`TURN fetch error: ${error.message}`);
+      }
+    } else {
+      console.warn("TURN fetch error: unknown");
+    }
+    return ICE_CONFIG;
+  }
+}
+
 export class PeerSession {
   private pc: RTCPeerConnection;
   private dc: RTCDataChannel | null = null;
@@ -29,10 +89,14 @@ export class PeerSession {
   private readonly cb: PeerCallbacks;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
-  constructor(initiator: boolean, cb: PeerCallbacks) {
+  constructor(
+    initiator: boolean,
+    cb: PeerCallbacks,
+    iceConfig: RTCConfiguration = ICE_CONFIG,
+  ) {
     this.cb = cb;
     this.polite = !initiator;
-    this.pc = new RTCPeerConnection(ICE_CONFIG);
+    this.pc = new RTCPeerConnection(iceConfig);
 
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
