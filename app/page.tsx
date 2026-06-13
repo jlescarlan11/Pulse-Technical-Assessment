@@ -577,9 +577,10 @@ export default function Home() {
       }
     }, HEARTBEAT_INTERVAL_MS);
 
-    // If the tab is already hidden when the call starts, begin the away countdown.
+    // If the tab is already hidden when the call starts, go away immediately —
+    // no debounce on the initial state (the debounce only guards mid-call flaps).
     if (document.visibilityState === "hidden") {
-      awayTimer = setTimeout(goAway, AWAY_DEBOUNCE_MS);
+      goAway();
     }
 
     return () => {

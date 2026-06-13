@@ -7,6 +7,15 @@ import { useCallback, useEffect, useRef, useState } from "react";
    Presence == "the browser tab is active". These strings must
    never imply eye/gaze tracking, watching, or that screenshots
    are prevented. Centralised so a reviewer can audit one block.
+
+   Phase 4 Privacy Shield update: the WebRTC layer now keeps the
+   LOCAL self-view camera track ALWAYS LIVE and gates only a
+   separate clone sent to the peer. So the PiP <video> shows your
+   live camera even while the OUTGOING feed is held back. The PiP
+   no longer goes black — instead a compact "not shared" badge
+   sits over the live self-view to explain that your camera is on
+   locally but is not being SENT. The badge says the feed isn't
+   being shared (true); it never claims to stop screenshots.
    ============================================================ */
 const COPY = {
   // Pre-call (unchanged): before any remote stream has arrived.
@@ -16,25 +25,30 @@ const COPY = {
   peerAwayTitle: "Stranger stepped away",
   peerAwayBody: "Their video pauses while their tab is inactive. Audio is still connected.",
 
-  // Story 5 — local PiP, your tab is inactive. Sub-line names the
-  // mechanism (this tab is backgrounded) so the pause is self-evident.
-  localAwayTitle: "You stepped away",
-  localAwaySub: "Paused while this tab is in the background · audio still on",
+  // Privacy Shield — local PiP "not shared" badge label (shared across all
+  // gated states). The self-view stays live underneath; this short word marks
+  // that the outgoing feed is held. Sub-lines below name the cause honestly.
+  notSharedLabel: "Not shared",
 
-  // Story 5 — you're present but the stranger left, so your outgoing
-  // video is held back too. Quieter treatment, but the sub-line clearly
-  // attributes the cause to the stranger so it ties to the big overlay.
-  localPausedTitle: "Paused",
-  localPausedSub: "Held while they’re away · camera resumes when they’re back",
+  // Your tab is inactive, so the engine stopped sending your clone. Your tab is
+  // hidden when this is true, so you rarely see it live; on return it should
+  // still read sensibly. Names the mechanism (this tab is backgrounded).
+  notSharedLocalAway: "Not shared while your tab is in the background",
 
-  // BUG-2 — local PiP, the very start of a call. peerAway initialises true
-  // (fail-closed) for ~1 RTT before the first presence heartbeat, so the
-  // outgoing track is held even though the stranger never actually stepped
-  // away. Until the stranger has been seen present once (peerHasBeenPresent),
-  // we must NOT attribute the hold to them. Show a neutral, honest connecting
-  // treatment instead — tab/presence language only, no "they're away".
-  localConnectingTitle: "Securing video…",
-  localConnectingSub: "Your camera turns on once both tabs are connected",
+  // You're present but the stranger left, so your outgoing video is held back
+  // too. Attributes the cause to the stranger so it ties to the big overlay.
+  notSharedPeerAway: "Not shared · they can’t see you while they’re away",
+
+  // BUG-2 — the very start of a call. peerAway initialises true (fail-closed)
+  // for ~1 RTT before the first presence heartbeat, so the outgoing clone is
+  // held even though the stranger never actually stepped away. Until the
+  // stranger has been seen present once (peerHasBeenPresent), we must NOT
+  // attribute the hold to them. Show a neutral, honest connecting line —
+  // tab/presence language only, no "they're away".
+  notSharedConnecting: "Connecting · not shared yet",
+
+  // The normal "You" label on the live self-view when mutually present.
+  selfLabel: "You",
 
   // M5 — top HUD pill. Reads "Live" when both present; when the stranger
   // has stepped away it drops the pulse and reads a calm "Away" so the HUD
@@ -42,10 +56,11 @@ const COPY = {
   pillLive: "Live",
   pillAway: "Away",
 
-  // Story 7 — aria-live announcements for presence transitions.
-  announcePeerAway: "Stranger stepped away",
-  announcePeerBack: "Stranger is back",
-  announceLocalBack: "You’re back",
+  // Story 7 — aria-live announcements for presence transitions. These describe
+  // sharing/presence honestly: tab/presence language, never gaze/watching.
+  announcePeerAway: "Stranger stepped away. Your video is no longer shared with them while they’re away.",
+  announcePeerBack: "Stranger is back. Your video is shared again.",
+  announceLocalBack: "You’re back. Your video is shared again.",
 } as const;
 
 type VideoPanelProps = {
@@ -54,12 +69,14 @@ type VideoPanelProps = {
   onEnd: () => void;
   /**
    * The stranger has stepped away (their tab is hidden) or their presence is
-   * unknown. The incoming remote video is already black at the source.
+   * unknown. The incoming remote video is already black at the source, and the
+   * engine stops sending our outgoing clone.
    */
   peerAway: boolean;
   /**
-   * Your tab was hidden, so the engine disabled your outgoing video track —
-   * your self-view is black too.
+   * Your tab was hidden, so the engine stopped sending your outgoing clone.
+   * NOTE: the local self-view track stays live, so the PiP <video> keeps
+   * showing your camera — only the feed sent to the peer is held.
    */
   localAway: boolean;
 };
@@ -139,33 +156,39 @@ export default function VideoPanel({
   }, [remoteStream]);
 
   // --- Away-combination matrix ---------------------------------------------
-  // The engine disables the outgoing video track whenever localAway || peerAway,
-  // so the local self-view PiP is black in BOTH cases. We render distinct,
-  // honest overlays so a black box is never shown without explanation.
-  //   neither           -> live remote + live self-view
-  //   only-peer-away     -> remote "Stranger stepped away" + PiP "Paused"
-  //   only-local-away    -> remote stays live + PiP "You stepped away"
-  //   both-away          -> remote "Stranger stepped away" + PiP "You stepped away"
-  // "You stepped away" takes precedence in the PiP because it describes YOUR
-  // own action; the quieter "Paused" is for when you're present but holding.
+  // Privacy Shield: the LOCAL self-view track is always live, so the PiP
+  // <video> always shows the user's camera. The engine only gates a separate
+  // clone TRANSMITTED to the peer whenever localAway || peerAway. So the four
+  // combinations differ only in the full-screen REMOTE overlay and in the
+  // compact "not shared" BADGE laid over the (still-visible) self-view:
+  //   neither           -> live remote + live self-view, just the "You" label
+  //   only-peer-away     -> remote "Stranger stepped away" + PiP "not shared (they're away)"
+  //   only-local-away    -> remote stays live + PiP "not shared (your tab is backgrounded)"
+  //   both-away          -> remote "Stranger stepped away" + PiP "not shared (your tab is backgrounded)"
+  // The local-away cause wins the badge because it describes YOUR own tab
+  // state; the peer-attributed line is for when you're present but holding.
   //
   // M3: gate the mid-call overlay on peerHasBeenPresent so the fail-closed
   // initial peerAway=true never flashes the overlay before the first frame.
   const showPeerAwayOverlay = hasConnected && peerAway && peerHasBeenPresent;
-  const localPaused = localAway || peerAway; // outgoing track disabled here
 
-  // BUG-2: the PiP must only blame the stranger ("Held while they’re away")
-  // once they have actually been seen present — the same peerHasBeenPresent
-  // latch the full-screen overlay uses. Before the first heartbeat peerAway is
-  // still its fail-closed `true`, so we attribute the hold to nothing and fall
-  // through to the neutral "Securing video…" connecting treatment instead.
-  const localPausedByPeer = !localAway && peerAway && peerHasBeenPresent;
+  // Outgoing clone held: same condition as before. The self-view stays live —
+  // this only drives the non-blocking "not shared" badge over the PiP.
+  const outgoingHeld = localAway || peerAway;
+
+  // BUG-2: the badge must only blame the stranger ("they can't see you while
+  // they're away") once they have actually been seen present — the same
+  // peerHasBeenPresent latch the full-screen overlay uses. Before the first
+  // heartbeat peerAway is still its fail-closed `true`, so we attribute the
+  // hold to nothing and fall through to the neutral "Connecting · not shared
+  // yet" line instead.
+  const heldByPeer = !localAway && peerAway && peerHasBeenPresent;
 
   // m1 (no escape hatch): a full-screen stepped-away overlay could otherwise
   // sit on top of an auto-calmed control bar, hiding the End button. Whenever
   // any stepped-away overlay is showing — or the remote video hasn't arrived —
   // we force the controls to stay up, mirroring the pre-stream behaviour.
-  const anyAwayOverlay = showPeerAwayOverlay || localPaused;
+  const anyAwayOverlay = showPeerAwayOverlay || outgoingHeld;
   const forceControls = !remoteStream || anyAwayOverlay;
   // Visible if interaction has them up OR a forced condition holds. Deriving
   // this (rather than syncing state in an effect) keeps the forced-up cases
@@ -197,6 +220,16 @@ export default function VideoPanel({
     },
     [],
   );
+
+  // The honest sub-line for the "not shared" badge, picking the same attribution
+  // the matrix above describes. localAway wins (it's your own tab); then the
+  // peer-attributed line once they've been present; otherwise the neutral
+  // pre-heartbeat connecting line.
+  const notSharedReason = localAway
+    ? COPY.notSharedLocalAway
+    : heldByPeer
+      ? COPY.notSharedPeerAway
+      : COPY.notSharedConnecting;
 
   return (
     <div
@@ -300,7 +333,13 @@ export default function VideoPanel({
           )}
         </div>
 
-        {/* Local (floating picture-in-picture) — settles in, then rests */}
+        {/* Local (floating picture-in-picture) — settles in, then rests.
+            Privacy Shield: the self-view track is ALWAYS LIVE, so the <video>
+            keeps showing the user's camera in every state. We never cover it
+            with a black box. When the outgoing clone is held (outgoingHeld) we
+            lay a compact, non-blocking "not shared" badge over the bottom of
+            the live face so the user knows their camera is on locally but is
+            not being sent. */}
         <div className="animate-scale-in absolute bottom-28 right-4 sm:bottom-24">
           <div className="relative h-44 w-32 overflow-hidden rounded-2xl border border-haze-200/15 bg-ink-800 shadow-float">
             <video
@@ -311,65 +350,37 @@ export default function VideoPanel({
               className="h-full w-full object-cover"
             />
 
-            {/* Story 5 — local PiP overlays. The outgoing track is disabled
-                whenever localAway || peerAway, so the self-view is black; we
-                explain which case it is rather than show a bare black box. */}
-            {localPaused && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 bg-ink-950/85 px-3 text-center backdrop-blur-md transition-opacity duration-300 ease-[var(--ease-calm)]">
-                {localAway ? (
-                  <>
-                    {/* You stepped away — paused-camera glyph + honest sub-line. */}
-                    <svg className="h-6 w-6 text-haze-200" viewBox="0 0 24 24" fill="none" aria-hidden>
-                      <rect x="3" y="6.5" width="11" height="11" rx="2.5" stroke="currentColor" strokeWidth="1.6" />
-                      <path d="M14 11l5.5-3v8l-5.5-3" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-                      <path d="M9 10v4M11.5 10v4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                    </svg>
-                    <p className="text-[11px] font-semibold leading-tight text-haze-50">
-                      {COPY.localAwayTitle}
-                    </p>
-                    <p className="text-[10px] leading-tight text-haze-300">
-                      {COPY.localAwaySub}
-                    </p>
-                  </>
-                ) : localPausedByPeer ? (
-                  <>
-                    {/* You're present but the stranger left — quieter hold; the
-                        sub-line attributes the cause to the stranger, tying this
-                        PiP to the big "Stranger stepped away" overlay. */}
-                    <svg className="h-5 w-5 text-haze-300" viewBox="0 0 24 24" fill="none" aria-hidden>
-                      <path d="M9 8v8M15 8v8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-                    </svg>
-                    <p className="text-[11px] font-semibold leading-tight text-haze-100">
-                      {COPY.localPausedTitle}
-                    </p>
-                    <p className="text-[10px] leading-tight text-haze-400">
-                      {COPY.localPausedSub}
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    {/* BUG-2 — pre-first-heartbeat: peerAway is still fail-closed
-                        true but the stranger has never been seen present, so we
-                        do NOT blame them. Neutral connecting treatment: a calm
-                        progress glyph + honest tab/presence copy. */}
-                    <svg className="h-5 w-5 text-haze-300" viewBox="0 0 24 24" fill="none" aria-hidden>
-                      <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.6" opacity="0.35" />
-                      <path d="M12 4a8 8 0 0 1 8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                    </svg>
-                    <p className="text-[11px] font-semibold leading-tight text-haze-100">
-                      {COPY.localConnectingTitle}
-                    </p>
-                    <p className="text-[10px] leading-tight text-haze-400">
-                      {COPY.localConnectingSub}
-                    </p>
-                  </>
-                )}
+            {outgoingHeld ? (
+              /* "Not shared" badge — a glass-faint pill riding a subtle scrim
+                 strip at the bottom of the PiP. The live face above stays
+                 fully visible; the scrim strip only seats the text for legible
+                 contrast. State is conveyed by icon + text (never colour alone)
+                 and the strings name the tab/presence cause honestly: the feed
+                 isn't being SENT, which is true. No motion of its own, so it is
+                 reduced-motion safe. */
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-1 bg-gradient-to-t from-ink-950/85 via-ink-950/55 to-transparent px-2 pb-2 pt-6">
+                <span className="glass-faint flex w-fit items-center gap-1.5 rounded-full px-2 py-0.5">
+                  {/* Slashed-eye-free "not sending" glyph: a paper-plane (send)
+                      with a slash through it. Marks "not being sent", honest. */}
+                  <svg className="h-3 w-3 text-haze-100" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path d="M4 12l15-7-4 15-3.5-5L4 12z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    <path d="M4 4l16 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                  <span className="font-mono text-[10px] uppercase tracking-wider text-haze-100">
+                    {COPY.notSharedLabel}
+                  </span>
+                </span>
+                <span className="text-[10px] leading-tight text-haze-200">
+                  {notSharedReason}
+                </span>
               </div>
+            ) : (
+              /* Mutually present and sharing live — just the normal "You" label. */
+              <span className="absolute bottom-2 left-2 rounded-full bg-ink-950/70 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-haze-100 backdrop-blur">
+                {COPY.selfLabel}
+              </span>
             )}
           </div>
-          <span className="absolute bottom-2 left-2 rounded-full bg-ink-950/70 px-2 py-0.5 font-mono text-[10px] uppercase tracking-wider text-haze-100 backdrop-blur">
-            You
-          </span>
         </div>
       </div>
 
