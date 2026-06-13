@@ -1,419 +1,135 @@
 # Design Language — Pulse Technical Assessment
 
-**Last Updated:** 2026-06-13
+_Last updated: 2026-06-14_
 
-## Overview
+The system is **"Signal in the Dark"**: a deep, dimensional dark base, one luminous
+mint-cyan accent used sparingly, and motion that breathes. Defined entirely in
+`app/globals.css` via a Tailwind v4 `@theme` block (CSS-first config) plus helper
+classes and raw keyframes. Components consume it through Tailwind utilities
+(`bg-ink-850`, `text-haze-300`, `animate-fade-up`, `shadow-glow`) and a handful of
+hand-written helper classes.
 
-**Aesthetic:** Modern, minimal dark theme with vibrant accent colors and smooth motion. Built on Tailwind CSS 4, no custom component library. Emphasis on clarity, responsiveness, and microinteractions.
+## Color tokens
 
----
+All defined as `--color-*` in `@theme`, so each generates `bg-*`/`text-*`/`border-*`
+utilities.
 
-## Color Palette
+- **Ink** — cool, dimensional near-black base (not flat zinc):
+  `ink-950 #04060d`, `900 #070b16`, `850 #0a0f1e`, `800 #0e1426`, `750 #121a30`,
+  `700 #18213b`, `600 #222d4d`, `500 #2e3b60`. Body background is `ink-950`.
+- **Haze** — text + hairlines on the dark base:
+  `haze-50 #f1f4fc`, `100 #e1e7f5`, `200 #c0cae0`, `300 #9aa6c4`, `400 #7a87a8`,
+  `500 #5b688a`, `600 #445070`. Body text is `haze-50`.
+- **Signal** — the luminous mint-cyan accent, used sparingly:
+  `signal-300 #7dfbd9`, `400 #4cf3c4`, `500 #25e9ad`, `600 #0fcf94`,
+  and the base `signal #34f0bf`.
+- **Aurora** — atmospheric secondaries, backdrops only:
+  `aurora-violet #7c5cff`, `aurora-blue #3f7bf6`, `aurora-teal #21d3d8`.
+- **Danger** — `danger-400 #ff6b7c`, `danger #ff4d62`, `danger-600 #e23150`.
 
-### Base Colors (Tailwind CSS)
+`color-scheme: dark` is set on `:root`. Selection background is signal at 35% mix.
 
-#### Neutrals (Background & Text)
-- **Dark background:** `#0a0a0a` (CSS var `--background` in dark mode)
-- **Light text:** `#ededed` (CSS var `--foreground` in dark mode)
-- **Black:** `#000000` (modals, overlays)
-- **Zinc scale:** 50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950 (various opacities)
+## Radius scale
 
-#### Primary Accent
-- **Emerald (green):** Main interactive color
-  - **Emerald-400:** Primary button, focus ring color (#10b981)
-  - **Emerald-300:** Hover state, lighter variant
-  - **Emerald-500:** Alternative emphasis
-- **Usage:** Buttons, CTAs, focus rings, active states
+`--radius-*`: `xs 0.375rem` (6px), `sm 0.625rem` (10px), `md 0.875rem` (14px),
+`lg 1.25rem` (20px), `xl 1.75rem` (28px), `2xl 2.25rem` (36px). Cards/sheets
+typically use `rounded-2xl`; pills and dots use `rounded-full` (9999px).
 
-#### Danger
-- **Red-500:** Error messages, decline actions
-- **Red-400:** Hover state for danger buttons
+## Shadows — glow + elevation
 
-#### Semantic
-- **White:** Text, borders, focus indicators (rgba(255, 255, 255, 0.9))
-- **Transparent:** Overlays, gradients (rgba(255, 255, 255, 0.4))
-
-### Color Usage
-
-| Element | Color | Notes |
-|---------|-------|-------|
-| Page background | `#0a0a0a` | Dark mode default |
-| Primary text | `#ededed` | High contrast on dark bg |
-| Buttons (primary) | Emerald-400 | CTAs, accept actions |
-| Buttons (danger) | Red-500 | Decline, end call |
-| Buttons (hover) | Emerald-300 / Red-400 | Interactive feedback |
-| Focus ring | Emerald-400 2px | Accessibility |
-| Modal backdrop | `rgba(0, 0, 0, 0.6)` | Semi-transparent |
-| Peer dots | Hash-based HSL | Dynamic per user (hsl(hash % 360, 70%, 60%)) |
-| Pulse ring (dot animation) | `rgba(255, 255, 255, 0.4)` | Fading white glow |
-| Glow pulse (active video) | `rgba(16, 185, 129, 0.5–0.8)` | Emerald glow |
-
-### Light Mode (Prefers Light)
-
-```css
-:root {
-  --background: #ffffff;    /* White bg */
-  --foreground: #171717;    /* Dark text */
-}
-```
-
-(Currently unused; app is dark-first, but CSS supports both.)
-
----
+- `shadow-glow-sm` / `shadow-glow` / `shadow-glow-lg` — signal-tinted glows at
+  increasing spread (12px / 28px / 60px), built with `color-mix` of `--color-signal`.
+- `shadow-float` — soft dark elevation: `0 24px 60px -20px rgba(0,0,0,.7)` +
+  `0 8px 24px -12px rgba(0,0,0,.55)`. Used by `.glass`.
 
 ## Typography
 
-### Font Family
-- **Sans-serif primary:** Vercel Geist Sans (via Next.js defaults)
-- **Monospace:** Vercel Geist Mono (for code, if needed)
-- **Fallback:** Arial, Helvetica, sans-serif (for rapid load)
+- `--font-sans` = Geist Sans; `--font-mono` = Geist Mono.
+- **Mono is the status/label voice**: connection state, counts, badges, kicker
+  labels, codes. Always paired with `uppercase` + wide `tracking` (e.g.
+  `tracking-[0.18em]`) at small sizes (10–11px). Sans is body/UI text.
 
-### Type Scale (Tailwind Defaults)
+## Signature easings
 
-| Use Case | Class | Size | Weight |
-|----------|-------|------|--------|
-| Large heading | `text-3xl` | 30px | 700 |
-| Section heading | `text-2xl` | 24px | 700 |
-| Subheading | `text-xl` | 20px | 600 |
-| Body text | `text-base` | 16px | 400 |
-| Small text | `text-sm` | 14px | 400 |
-| Tiny text | `text-xs` | 12px | 400 |
-| Button text | `text-base` | 16px | 600 |
-| Label | `text-sm` | 14px | 600 |
+- `--ease-signal` `cubic-bezier(0.22,1,0.36,1)` — swift settle (default for entrances).
+- `--ease-spring` `cubic-bezier(0.34,1.56,0.64,1)` — overshoot pop (scale/pill/msg).
+- `--ease-calm` `cubic-bezier(0.65,0,0.35,1)` — even both-ways (ambient loops).
 
-### Font Weights
+## Motion
 
-- **400 (normal):** Body text, descriptions
-- **600 (semibold):** Labels, buttons, subheadings
-- **700 (bold):** Headings, emphasis
+### `--animate-*` utilities (generate `animate-*` classes via Tailwind)
 
-### Line Height
+These exist as theme tokens and are applied as classes:
 
-- Default: 1.5 (comfortable reading)
-- Headings: 1.2 (tight)
-- Buttons: 1 (single line)
+- `fade-in` (0.5s, ease-signal) — overlays/scrims (`ConnectionPrompt`).
+- `fade-up` (0.55s, ease-signal) — content entrances (`EntryGate`, empty states).
+- `scale-in` (0.42s, ease-spring) — modal cards, picture-in-picture.
+- `slide-in` (0.5s, ease-signal) — the chat sheet sliding from the right.
+- `pill-in` (0.45s, ease-spring) — floating top/bottom status pills.
+- `msg-in` (0.4s, ease-spring) — individual chat messages.
+- `spin-slow` (1.1s linear infinite) — loading spinners.
 
----
+### Raw `@keyframes` applied inline or via component CSS (no `animate-*` class)
 
-## Spacing Scale
+- `sonar` — expanding ping ring (scale to 3x, fade out); drives the map peer dots
+  (`.pulse-dot::before`) and the user pin (`.pulse-me::after`) in `WorldMap`.
+- `beacon` — slow expanding ring (scale to 2.6x); applied inline in `EntryGate` and
+  `VideoPanel` via `animation: "beacon …s var(--ease-calm) infinite"`.
+- `halo` — contained pulse staying within a card (scale to 1.8x); applied inline in
+  `ConnectionPrompt`.
+- `pulse-glow` — a glow breathing in place; applied inline in `EntryGate`.
+- `aurora` — drifting/rotating transform for the `.aurora-field` backdrop (22s loop).
+- `twinkle` — opacity flicker for `.signal-grain` (7s loop).
 
-### Gap & Padding (Tailwind Defaults)
+Tailwind's built-in `animate-ping` and `animate-pulse` are also used for live status
+dots (these are not project keyframes but are explicitly handled in reduced motion).
 
-| Size | Pixels | Usage |
-|------|--------|-------|
-| `p-1` | 4px | Tight spacing |
-| `p-2` | 8px | Component padding |
-| `p-3` | 12px | Button/input padding |
-| `p-4` | 16px | Section padding |
-| `p-6` | 24px | Container padding |
-| `p-8` | 32px | Large sections |
+## Atmosphere helper classes
 
-### Gaps (Between Items)
+- `.glass` — translucent `ink-850` (72% mix) + `backdrop-filter: blur(20px) saturate(1.4)`
+  + inner top hairline + `shadow-float`. The primary surface (chat sheet, modal, HUD).
+- `.glass-faint` — lighter glass: `ink-850` 55% mix + `blur(14px)`, no float shadow.
+  Used for floating pills and the small map count chips.
+- `.hairline` — sets `border-color` to `haze-200` at 11% mix; pair with `border-*`
+  utilities for dividers.
+- `.text-glow` — signal-tinted `text-shadow`.
+- `.aurora-field` — absolutely-positioned animated radial-gradient wash (violet/blue/
+  signal/teal), blurred 36px, `opacity: 0.55`, running the `aurora` loop. Hero backdrop.
+- `.signal-grain` — fine star/grain dot field, `opacity: 0.5`, running `twinkle`.
+- `.vignette` — radial gradient that fades to `ink-950` at the edges to seat the base.
 
-- **`gap-2`** (8px): Tight lists
-- **`gap-3`** (12px): Button groups, form fields
-- **`gap-4`** (16px): Main sections
-- **`gap-6`** (24px): Major layout dividers
+Map-marker classes (`.pulse-dot`, `.pulse-me`, `.pulse-me-label`) are a fixed
+class-hook contract with `WorldMap.tsx`; the `--dot` custom property colors each peer.
 
-### Margins
+## Focus
 
-- **`m-0`:** Remove default
-- **`mb-4`:** Bottom margin between sections (16px)
-- **`mt-2`:** Top margin for spacing
+`:focus-visible` on `button, a, input, [tabindex]` removes the native outline and
+applies a two-layer `box-shadow` ring: a 2px `ink-950` inset gap then a 4px signal
+ring (80% mix). Because it's a box-shadow, the ring follows each control's own radius
+(pills get pill-shaped rings). Scrollbars are slim, `ink-600` thumb on transparent.
 
-### Border Radius
+## Reduced motion — IS implemented
 
-- **`rounded-lg`** (8px): Buttons, modals, cards
-- **`rounded-full`** (9999px): Circles (dots, badges)
-- **No rounded:** Maps, large containers
+`@media (prefers-reduced-motion: reduce)` does the following:
 
----
+- Clamps `animation-duration` and `transition-duration` to `0.001ms`, forces
+  `animation-iteration-count: 1`, and disables smooth scroll — globally on
+  `*, *::before, *::after`.
+- `.aurora-field` opacity drops to `0.45` (still present, just not drifting).
+- `.animate-ping` is `display: none` (the expanding ripples would otherwise freeze
+  mid-fade).
+- `.animate-pulse` is frozen: `animation: none` and `opacity: 1` (live status dots
+  hold at a steady, fully-visible glow).
 
-## Motion & Animation
+Intent: the interface stays alive and legible, it just stops moving.
 
-### Animation Library (in globals.css)
+## Mapbox theming
 
-#### Keyframes (10+)
-
-1. **`fade-in`** (0.3s)
-   - Opacity: 0 → 1
-   - Use: Page loads, messages arriving
-
-2. **`fade-in-up`** (0.4s)
-   - Opacity: 0 → 1, Transform: translateY(12px) → 0
-   - Use: Modals, notifications entering from bottom
-
-3. **`fade-in-down`** (0.4s)
-   - Opacity: 0 → 1, Transform: translateY(-12px) → 0
-   - Use: Dropdowns, notifications entering from top
-
-4. **`scale-in`** (0.3s)
-   - Opacity: 0 → 1, Transform: scale(0.95) → 1
-   - Use: Button presses, modal open
-
-5. **`slide-in-right`** (0.3s)
-   - Opacity: 0 → 1, Transform: translateX(20px) → 0
-   - Use: Chat panel entrance
-
-6. **`slide-out-right`** (0.3s, ease-in)
-   - Opacity: 1 → 0, Transform: translateX(0) → translateX(20px)
-   - Use: Chat panel exit
-
-7. **`pulse-ring`** (2s infinite)
-   - Box-shadow: 0 0 0 rgba(255, 255, 255, 0.4) → 0 0 0 8px rgba(255, 255, 255, 0)
-   - Use: Online dots, pulsing effect
-
-8. **`glow-pulse`** (2s infinite)
-   - Box-shadow: 0 0 20px → 0 0 30px (emerald glow)
-   - Use: Active video connections, emphasis
-
-9. **`spin-smooth`** (1s infinite linear)
-   - Rotate: 0deg → 360deg
-   - Use: Loading spinners
-
-10. **`button-press`** (0.2s)
-    - Scale: 1 → 0.95 → 1
-    - Use: Tactile feedback on button click
-
-#### Easing Functions
-
-- **`ease-out`:** Default, for entrances (cubic-bezier(0.5, 1, 0.89, 1))
-- **`ease-in`:** For exits
-- **`cubic-bezier(0.34, 1.56, 0.64, 1)`:** Spring-like bounce on interactive elements
-
-#### Stagger Delays
-
-- `.animate-stagger-1` through `.animate-stagger-5`
-- Delays: 0s, 0.05s, 0.1s, 0.15s, 0.2s
-- Use: Cascading animations for lists
-
-#### Timing
-
-- **Fast:** 0.2–0.3s (micro-interactions, button presses)
-- **Normal:** 0.3–0.4s (page transitions, modals)
-- **Slow:** 2s (infinite loops, ambient pulses)
-
-#### Mobile Optimizations
-
-- **Faster animations** on mobile: All 0.25s (snappier feel on slower devices)
-- **Reduced stagger delays** on mobile: 0s, 0.03s, 0.06s, 0.09s, 0.12s
-
-### Transition Defaults
-
-All interactive elements have smooth transitions:
-```css
-button, input, a {
-  transition-property: all;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 150ms;
-}
-```
-
-**Effect:** Color, background, shadow, transform changes are smooth (not instant).
+Mapbox controls are art-directed to match the dark glass HUD: attribution desaturated,
+compact attrib pill given `ink-850` glass background + blur + full radius, logo at 0.45
+opacity, control text in `haze-500`.
 
 ---
 
-## Component Aesthetics
-
-### Buttons
-
-**Primary (Emerald):**
-- Background: Emerald-400
-- Text: Dark text (contrast)
-- Hover: Emerald-300 (lighter)
-- Focus: 2px Emerald-400 outline, 2px offset
-- Padding: `px-4 py-2`
-- Border radius: `rounded-lg`
-- Animation on click: `button-press` (scale 0.95)
-
-**Danger (Red):**
-- Background: Red-500
-- Hover: Red-400
-- Same padding, radius, focus, animation
-
-**Secondary (Ghost):**
-- Background: Transparent
-- Border: 1px white
-- Hover: White text, background rgba(255, 255, 255, 0.1)
-
-### Modals & Overlays
-
-**Backdrop:**
-- Background: `rgba(0, 0, 0, 0.6)` (dark, semi-transparent)
-- Animation: `fade-in` (0.2s)
-
-**Content:**
-- Background: `#0a0a0a` border `1px solid rgba(255, 255, 255, 0.1)`
-- Border radius: `rounded-lg`
-- Padding: `p-6`
-- Animation: `scale-in` (0.3s, cubic-bezier spring)
-- Shadow: `shadow-2xl` (depth, Tailwind default)
-
-### Inputs & Textareas
-
-- Border: `1px solid #333` (dark zinc)
-- Padding: `px-3 py-2`
-- Border radius: `rounded-md`
-- Focus: `outline-emerald-400 outline-offset-2`
-- Transition: All (150ms)
-- No placeholder color override (system default)
-
-### Chat Bubbles
-
-- **Own messages:** Right-aligned, emerald-400 background, white text
-- **Peer messages:** Left-aligned, zinc-800 background, light text
-- Padding: `px-4 py-2`
-- Border radius: `rounded-lg`
-- Animation: `fade-in-up` (0.3s) when arriving
-
-### Peer Dots (On Map)
-
-- **Size:** 14px × 14px
-- **Border:** 2px white
-- **Border radius:** Full circle (`rounded-full`)
-- **Color:** Hash-based HSL (per user, consistent)
-- **Cursor:** Pointer (clickable)
-- **Animation:** `pulse-ring` (2s infinite, white glow fading)
-- **Hover:** `scale(1.3)` (grow on hover, 0.15s transition)
-- **Click:** `button-press` animation (tactile feedback)
-
-### "You Are Here" Marker
-
-- **Emoji:** 📍 (pin icon)
-- **Size:** 18px
-- **Label:** "Me" text above pin
-  - Font: Tiny (10px), bold
-  - Background: `rgba(0, 0, 0, 0.6)` (dark)
-  - Padding: `px-1` rounded full
-- **Filter:** `drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6))`
-- **Animation:** `fade-in` (0.5s on load)
-
-### Loading States
-
-- **Spinner:** SVG or CSS `animate-spin-smooth` (1s infinite)
-- **Color:** Emerald-400
-- **Size:** 24px × 24px
-- **Overlay:** Semi-transparent backdrop (prevents interaction)
-
-### Notice / Toast
-
-- **Style:** `bg-zinc-900 border-l-4 border-emerald-400`
-- **Padding:** `px-4 py-3`
-- **Text:** `text-sm text-gray-100`
-- **Animation in:** `fade-in-down` (0.3s from top)
-- **Animation out:** Reverse of fade-in-down (0.2s)
-- **Duration:** Auto-dismiss after 3.5 seconds
-
----
-
-## Layout
-
-### Main Page Structure
-
-```
-[Header: Mapbox Map — Full Width]
-│
-├─ [Left/Top: Map Container]
-│  ├─ Mapbox GL (responsive, no padding)
-│  ├─ Peer dots (interactive)
-│  └─ You marker (bottom-left anchor)
-│
-└─ [Right/Bottom: Chat/Video Panel]
-   ├─ ConnectionPrompt (modal overlay)
-   ├─ ChatPanel (when connected)
-   │  ├─ Message history (scrollable)
-   │  ├─ Video button
-   │  └─ Input field + send button
-   └─ VideoPanel (when video active)
-      ├─ Remote video (full-screen)
-      ├─ Local video (PiP, corner)
-      ├─ Mute/camera controls
-      └─ End call button
-```
-
-### Responsive Design
-
-#### Desktop (> 768px)
-- Map: Left side, 70% width
-- Chat/Video: Right sidebar, 30% width, fixed height
-- Modals: Center screen, max-width 400px
-
-#### Mobile/Tablet (< 768px)
-- Map: Full screen
-- Chat/Video: Slide-up from bottom, full width
-- Modals: Full-screen or bottom-sheet style
-- Animations: Faster (0.25s instead of 0.3–0.4s)
-- Font sizes: Slightly reduced for small screens
-
-#### Breakpoints (Tailwind)
-- `sm` (640px)
-- `md` (768px) — Main breakpoint for this app
-- `lg` (1024px)
-- `xl` (1280px)
-
----
-
-## Accessibility
-
-### Color Contrast
-
-- **Text on background:** White (#ededed) on black (#0a0a0a) = 15:1 (AAA)
-- **Buttons:** Emerald-400 on white = 5.5:1 (AA, acceptable for large text)
-- **Focus ring:** Emerald-400 outline, high contrast
-
-### Focus States
-
-- **Visible focus ring:** 2px solid emerald-400, 2px offset
-- **Applied to:** buttons, inputs, links
-- **No hidden focus:** Enforced via CSS (no `outline: none` without replacement)
-
-### Keyboard Navigation
-
-- **Tab order:** Native (semantic HTML, no custom tabindex)
-- **Enter key:** Activates buttons, submits forms
-- **Escape key:** Closes modals (client-side handler in page.tsx)
-
-### Motion
-
-- **Respects prefers-reduced-motion:** Not explicitly implemented (should add for accessibility)
-- **Animations can be disabled:** User can turn off in browser settings
-
-### Semantic HTML
-
-- `<button>` for buttons (not `<div>` with click handlers)
-- `<input>` for text fields (not custom)
-- `<label>` for form labels (if present)
-- ARIA roles not used (keep simple for this app)
-
----
-
-## Visual References & Inspiration
-
-**Aesthetic inspirations:**
-- **Vercel:** Minimal dark theme, emerald accents, fast animations
-- **Figma:** Interactive, responsive, smooth transitions
-- **Discord:** Chat bubble styling, online status dots
-
-**Color mood:**
-- **Dark & modern:** Tech-forward, night-mode friendly
-- **Emerald green:** Energetic, fresh, trustworthy
-- **Minimal:** No gradients, shadows, or decorative elements beyond functional animations
-
----
-
-## Summary
-
-| Aspect | Details |
-|--------|---------|
-| **Theme** | Dark-first (light mode supported via CSS vars) |
-| **Primary color** | Emerald-400 (#10b981) |
-| **Typography** | Geist Sans, no custom fonts |
-| **Type scale** | Tailwind defaults (xs–3xl) |
-| **Spacing** | Tailwind grid (4px base, 8px increments) |
-| **Border radius** | Rounded-lg (8px) for components, full for circles |
-| **Animations** | 10+ keyframes, 0.2–2s range, spring easing |
-| **Motion tone** | Smooth, purposeful, not excessive |
-| **Accessibility** | High contrast (15:1), visible focus rings, keyboard support |
-| **Layout** | Responsive (desktop sidebar + mobile bottom-sheet) |
-| **Components** | No library; utility-first Tailwind + custom CSS |
-| **Dark mode** | CSS vars, prefers-color-scheme media query |
+Source of truth: `app/globals.css`. Concept narrative: `phase-2-design-brief.md`
+(the brief approximates hex/animation values — globals.css is authoritative).
