@@ -234,30 +234,41 @@ export default function ChatPanel({
             Both are gated on messages.length === 0. aria-live=polite so a
             screen reader hears the body settle from connecting to ready without
             stealing focus; reduced-motion users get the same static layout
-            (globals.css collapses the fade). */}
+            (globals.css collapses the fade).
+
+            PHASE-4 REFINEMENT — when the thread is still empty AND the peer has
+            started composing the very first message (showTyping), the big
+            centred "Say hello." block yields to the typing indicator below so
+            the two don't compete for space. The connected empty state is gated
+            on !showTyping for exactly that reason; the bubble then reads
+            naturally as the stranger writing the opener. The NOT-connected
+            connecting body is unaffected (showTyping is false while
+            disconnected). */}
         {messages.length === 0 &&
           (connected ? (
-            <div
-              role="status"
-              aria-live="polite"
-              className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center"
-            >
-              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-signal">
-                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
-                  <path
-                    d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5"
-                    stroke="currentColor"
-                    strokeWidth="1.6"
-                    strokeLinejoin="round"
-                  />
-                </svg>
-              </span>
-              <p className="text-sm font-medium text-haze-200">Say hello.</p>
-              <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
-                Messages travel peer-to-peer and are never stored. When the tab
-                closes, the conversation is gone.
-              </p>
-            </div>
+            !showTyping && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center"
+              >
+                <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-signal">
+                  <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path
+                      d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5"
+                      stroke="currentColor"
+                      strokeWidth="1.6"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                </span>
+                <p className="text-sm font-medium text-haze-200">Say hello.</p>
+                <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
+                  Messages travel peer-to-peer and are never stored. When the tab
+                  closes, the conversation is gone.
+                </p>
+              </div>
+            )
           ) : (
             <div
               role="status"
@@ -307,7 +318,11 @@ export default function ChatPanel({
             The dots use animate-pulse, which globals.css freezes at full
             opacity under prefers-reduced-motion (so they render as static
             dots). The staggered animationDelay gives a gentle wave when motion
-            is allowed. */}
+            is allowed.
+
+            When the thread is otherwise empty this bubble is the sole body
+            content (the "Say hello." empty state yields to it above), so it
+            still scrolls into view via the messages/peerTyping effect. */}
         {showTyping && (
           <div
             role="status"

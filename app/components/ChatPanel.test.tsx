@@ -145,6 +145,38 @@ describe("ChatPanel empty / connecting message-area states (FIX 3)", () => {
   });
 });
 
+describe("ChatPanel empty state yields to typing indicator (Phase 4 refinement)", () => {
+  // call-sign for peerId "abc"; matched live so the test tracks the generator.
+  const SIGN = callSign("abc");
+
+  it("connected, no messages, peer NOT typing -> shows the 'Say hello.' empty state", () => {
+    renderPanel({ connected: true, messages: [], peerTyping: false });
+
+    expect(screen.getByText("Say hello.")).toBeInTheDocument();
+    expect(
+      screen.getByText(/Messages travel peer-to-peer and are never stored/),
+    ).toBeInTheDocument();
+    // Nothing competing: no typing bubble while the peer isn't composing.
+    expect(screen.queryByText(/is typing…/)).not.toBeInTheDocument();
+  });
+
+  it("connected, no messages, peer typing -> SUPPRESSES 'Say hello.' and shows ONLY the typing indicator", () => {
+    // First-chat clutter fix: with an empty thread and the stranger composing
+    // the opener, the big centred empty state yields so the typing bubble is
+    // the sole focus and reads as the stranger writing the first message.
+    renderPanel({ connected: true, messages: [], peerTyping: true });
+
+    // The big empty-state block is gone…
+    expect(screen.queryByText("Say hello.")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(/Messages travel peer-to-peer and are never stored/),
+    ).not.toBeInTheDocument();
+    // …and the typing indicator is the visible body content.
+    expect(screen.getByText(`${SIGN} is typing…`)).toBeInTheDocument();
+  });
+});
+
+
 describe("ChatPanel typing indicator (Phase 4)", () => {
   // call-sign for peerId "abc" is computed by lib/callsign; we match against
   // the live value so the test stays in step with the call-sign generator.
