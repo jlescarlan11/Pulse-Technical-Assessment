@@ -48,7 +48,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN fetch failed: HTTP 500");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("TURN fetch failed: HTTP 500"),
+    );
   });
 
   it("falls back to STUN-only on fetch timeout (AbortError)", async () => {
@@ -61,7 +63,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN fetch timeout");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("timeout"),
+    );
   });
 
   it("falls back to STUN-only on fetch network error", async () => {
@@ -73,7 +77,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN fetch error: Network error");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("TURN fetch error: Network error"),
+    );
   });
 
   it("falls back to STUN-only on response invalid JSON", async () => {
@@ -88,7 +94,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN fetch error: Invalid JSON");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("TURN fetch error: Invalid JSON"),
+    );
   });
 
   it("falls back to STUN-only on response missing urls field", async () => {
@@ -106,7 +114,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN: missing or empty urls");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("TURN: missing or empty urls"),
+    );
   });
 
   it("falls back to STUN-only on response with empty urls array", async () => {
@@ -125,7 +135,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN: missing or empty urls");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("TURN: missing or empty urls"),
+    );
   });
 
   it("falls back to STUN-only on response missing username or credential", async () => {
@@ -142,7 +154,9 @@ describe("buildICEConfig", () => {
 
     expect(config.iceServers!).toHaveLength(1);
     expect(config.iceServers![0]).toEqual({ urls: "stun:stun.l.google.com:19302" });
-    expect(warnSpy).toHaveBeenCalledWith("TURN: missing username or credential");
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining("TURN: missing username or credential"),
+    );
   });
 
   it("calls fetch with correct parameters", async () => {

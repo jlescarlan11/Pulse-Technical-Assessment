@@ -18,14 +18,9 @@ export async function poll(id: string): Promise<PollResponse> {
     cache: "no-store",
   });
   if (!res.ok) {
-    console.error(`[DEBUG] poll failed: ${res.status}`);
     throw new Error(`poll failed: ${res.status}`);
   }
-  const data = await res.json();
-  if (data.signals && data.signals.length > 0) {
-    console.log("[DEBUG] poll returned", data.signals.length, "signals");
-  }
-  return data;
+  return res.json();
 }
 
 export async function sendSignal(
@@ -34,15 +29,11 @@ export async function sendSignal(
   type: SignalType,
   payload?: string,
 ): Promise<void> {
-  console.log("[DEBUG] sendSignal:", type, "from", fromId.substring(0, 8), "to", toId.substring(0, 8));
-  const res = await fetch("/api/signal", {
+  await fetch("/api/signal", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ fromId, toId, type, payload }),
   });
-  if (!res.ok) {
-    console.error("[DEBUG] sendSignal failed:", res.status);
-  }
 }
 
 // Fire-and-forget leave that survives the tab closing.

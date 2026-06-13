@@ -74,38 +74,30 @@ export default function Home() {
   }
 
   async function startPeer(peerId: string, initiator: boolean) {
-    console.log("[DEBUG] startPeer: initiator=", initiator, "peerId=", peerId.substring(0, 8));
     try {
       const iceConfig = await buildICEConfig();
-      console.log("[DEBUG] startPeer: ICE config loaded");
       const ps = new PeerSession(
         initiator,
         {
           onSignal: (type: DescType, payload: string) => {
-            console.log("[DEBUG] PeerSession.onSignal:", type);
             void sendSignal(sessionId, peerId, type, payload);
           },
           onChat: (text) => addMessage(false, text),
           onControl: (ctrl) => handleControl(ctrl),
           onRemoteStream: (stream) => setRemoteStream(stream),
           onConnectionState: (state) => {
-            console.log("[DEBUG] onConnectionState:", state);
             if (state === "failed") {
-              console.error("[DEBUG] Connection FAILED - teardown triggered");
               teardown("Connection failed (network).");
             }
           },
           onChannelOpen: () => {
-            console.log("[DEBUG] onChannelOpen: data channel opened");
             setConn({ kind: "connected", peerId });
           },
         },
         iceConfig,
       );
       peerRef.current = ps;
-      console.log("[DEBUG] startPeer: PeerSession created successfully");
-    } catch (error) {
-      console.error("[DEBUG] Failed to start peer:", error);
+    } catch {
       teardown("Connection failed (ICE config).");
     }
   }
