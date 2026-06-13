@@ -13,6 +13,7 @@ datasource db {
 
 model Presence {
   id       String   @id // client-generated session uuid
+  token    String // server-issued capability secret (CSPRNG); gates poll/leave/signal/turn. NEVER returned by poll.
   lat      Float // ALREADY privacy-offset coords (raw is never stored)
   lng      Float
   busy     Boolean  @default(false) // true while in an active connection
@@ -31,4 +32,19 @@ model Signal {
   createdAt DateTime @default(now())
 
   @@index([toId])
+}
+
+model RateLimit {
+  // Fixed-window rate-limit counter. One row per (key, route, window bucket).
+  // Transient like everything else: reaped lazily on poll once the window has
+  // fully expired. Keyed by a hashed caller identifier so no raw id/token is
+  // stored here.
+  key       String // hashed caller identifier (e.g. sha256 of token or session id)
+  route     String // logical bucket: "join" | "signal" | "poll"
+  window    BigInt // window start as epoch-ms bucket (floor(now / windowMs) * windowMs)
+  count     Int      @default(0) // requests seen in this window
+  expiresAt DateTime // window end; rows past this are reapable
+
+  @@id([key, route, window]) // upsert target — one row per caller/route/window
+  @@index([expiresAt]) // serves the lazy reap delete
 }

@@ -6,8 +6,9 @@ import type { Map as MapboxMap, Marker } from "mapbox-gl";
 import type { PeerDot } from "@/lib/types";
 import { peerColor } from "@/lib/peerColor";
 
-// Empty (not a placeholder token) when unset, so the graceful "set your token"
-// fallback below actually renders instead of the map failing silently.
+// Empty string (never a placeholder token) when unset, so no Mapbox secret is
+// baked into the bundle and the graceful "set your token" fallback below renders
+// instead of the map failing silently. (Phase 3 M1 + Phase 2 peerColor refactor.)
 const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 
 export default function WorldMap({

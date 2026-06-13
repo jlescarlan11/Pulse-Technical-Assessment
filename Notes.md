@@ -681,3 +681,228 @@ The paper-plane glyph's tip pointed **back at the input**. First corrected to up
 
 **Phase 2 deliverable:** A genuinely beautiful, cohesive, motion-rich Pulse — a deep dimensional dark with one luminous signal accent, real glass, and breathing life across every surface — with no regression to Phase 1's functionality.
 
+---
+---
+
+# Phase 3: Make It Secure — API Security Audit & Hardening
+
+**Status:** Complete
+**Branch:** `feature/phase-3-security` (branched from `main`, independent of the Phase 2 UI PR)
+**Scope:** The HTTP coordination API and its deployment posture. No change to the WebRTC peer-to-peer path or the connection state machine — this phase locks down the *signaling server*, not the calls it brokers.
+
+---
+
+## The Brief & The Thinking
+
+Phases 1 and 2 made Pulse work and made it beautiful. Phase 3 is the question you have to answer before you let strangers point a camera at each other: *can this be abused?* So the work was a security audit of the HTTP API first, then fixes.
+
+The whole story turns on one realization about the trust model. Pulse is **intentionally anonymous** — there are no accounts. Every client mints a `crypto.randomUUID()` and calls itself that. The original design treated that id as if it were a secret: a client asserts "I am id X," and the server believes it.
+
+But that id is not a secret — **it is public by design.** `/api/poll` returns every online peer's id, because peers have to address each other to place dots on the map and route signals. The map literally hands every client a directory of everyone else's id. So an attacker never has to *guess* anything: the identifier the server trusts as proof of identity is broadcast to all participants. Every critical finding below is a consequence of that single gap — **a client-asserted id with no proof of ownership.**
+
+That reframing is what makes the fix obvious. The server has to be able to tell "the real owner of session X" apart from "anyone who read X off the map" — without introducing accounts and destroying the anonymity that is the product. The answer is a **capability token**: a secret the server issues and the client proves it holds, with no identity attached to it.
+
+---
+
+## How We Worked (Pipeline)
+
+The audit-then-fix shape used a longer pipeline than the earlier phases:
+
+`context-scanner` → `security-auditor` (audit) → `project-manager` (11 stories) → `stakeholder` (approve-with-conditions gate) → `database-architect` → `backend-engineer` + `devops-engineer` (CI, in parallel) → `frontend-engineer` → `test-engineer` → `code-reviewer` + `security-auditor` (re-audit).
+
+The **stakeholder gate** is where this phase was really shaped. Approval came *with conditions* — five binding rulings that constrained the implementation rather than just blessing it:
+
+1. **Token transport must survive `sendBeacon`.** `/api/leave` fires on tab-close via `navigator.sendBeacon`, which cannot set custom headers. So the token travels in the request **body or query param**, never an `Authorization`-style header — otherwise the most important "I'm leaving" call couldn't authenticate at all.
+2. **The rate limiter must FAIL-OPEN.** A limiter that can lock real users out of an anonymous app on a DB hiccup is worse than the DoS it prevents. Any limiter error must return *allowed*.
+3. **The rate limiter must be POOL-SAFE.** At a 1500ms poll cadence the limiter is on the hottest path; it must not exhaust the ~10-connection pool — single statement, no transactions.
+4. **The CSP must not break the product.** A locked-down policy that blocks Mapbox tiles or relayed TURN calls is a regression, not a fix; the connect-src/worker-src/media-src allowances were a *verification condition*, not an afterthought.
+5. **Ship CI as part of this phase.** The repo had no merge gate at all, which is itself a security gap.
+
+---
+
+## What We Found
+
+The audit produced a ranked finding list. SQL injection, raw-coordinate leakage, and classic CSRF were **checked and dismissed** up front: Prisma is parameterized everywhere; the privacy offset is applied server-side *before* storage so raw coordinates never land in the DB; and there are no cookies or ambient credentials for a CSRF to ride. What remained clustered tightly around the no-ownership-proof trust model.
+
+### CRITICAL — broken access control (all rooted in the unverified id)
+
+**C1 — Mailbox drain via `GET /api/poll?id=<victim>`.** Poll *reads-and-deletes* the caller's signals. With no ownership check, an attacker polling a victim's id **steals the victim's WebRTC signaling** (offer/answer/ICE — and ICE candidates leak local/reflexive IPs, a real deanonymization vector) **and deletes them**, so the victim's calls silently fail. Run in a loop, it is a permanent denial of connection.
+
+**C2 — Impersonation via spoofed `fromId` on `POST /api/signal`.** `fromId` was attacker-chosen and unverified. An attacker sends an offer *as victim A* to victim B; B connects to the attacker believing it is A. That is a full man-in-the-middle of a call, in an app whose entire trust model is "the dot you tapped is who you talk to."
+
+**C3 — Forced-busy and eviction.** `signal` flips `busy` on both ids with no check — mark a victim busy and all their real connection requests auto-decline, so they appear permanently unavailable. And `POST /api/leave {id:<victim>}` evicts *anyone* from the map and wipes their mailbox.
+
+These are four exploits, but **one missing control** behind all of them.
+
+### HIGH
+
+**H1 — `/api/turn-credentials` unauthenticated, 24h TTL.** Any HTTP client could mint *billed* Cloudflare TURN credentials, valid for 86400s. That is an uncapped bill and a stash of harvestable 24-hour relay credentials (free bandwidth theft).
+
+**H2 — No rate limiting anywhere.** Join flooding, signal spam, and especially poll — the heaviest route at 4 DB operations — were all callable as fast as the attacker liked. A straightforward database and serverless-cost DoS.
+
+**H3 — No security headers.** No CSP, HSTS, or X-Frame-Options on an app that requests **camera and microphone**. That invites clickjacking the "accept connection" / grant-camera flow, and means any future injection bug escalates straight to XSS — which on this app is surveillance.
+
+### MEDIUM
+
+| ID | Finding |
+|----|---------|
+| M1 | Hard-coded Mapbox token fallback (a placeholder `pk...ck00demo...`) baked into the client bundle — masks a missing-env misconfig and renders a silently broken map. |
+| M2 | `CLOUDFLARE_TURN_*` secrets undocumented in `.env.example` — operators deploy without TURN and get silent STUN-only degradation (the exact Phase-1 Bug #7 failure, recurring). |
+| M3 | Inconsistent input validation — `join`/`signal` validated ids well, but `poll`/`leave` only checked id *presence* (megabyte-id risk, and a smell that invites bypasses). |
+| M4 | `payload` was only size-capped, never shape-checked. |
+| M5 | Dependency CVEs (postcss via Next, Prisma dev chain) — low practical exploitability; tracked, not force-fixed. |
+
+### Severity & Priority
+
+Findings were ranked by exploitability × blast radius, then bucketed into fix tiers. The four CRITICALs collapse to a single fix (the capability token), which is why C1–C3 share one P0 line:
+
+| ID | Finding | Severity | Priority | Exploit in one line |
+|----|---------|----------|----------|---------------------|
+| C1 | Mailbox drain via poll | CRITICAL | **P0** | Poll a victim's id → steal + delete their signaling → permanent DoS |
+| C2 | Impersonation via spoofed `fromId` | CRITICAL | **P0** | Offer *as* victim A → MITM the call |
+| C3 | Forced-busy + arbitrary eviction | CRITICAL | **P0** | Mark a victim busy / `leave` them off the map |
+| H1 | Unauthenticated TURN creds, 24h TTL | HIGH | **P0** | Mint billed relay creds at will |
+| H2 | No rate limiting | HIGH | P1 | Flood join/signal/poll → DB + cost DoS |
+| H3 | No security headers | HIGH | P1 | Clickjack the camera-grant flow; XSS → surveillance |
+| M3 | Inconsistent id validation | MEDIUM | P1 | Oversized/odd ids reach the DB |
+| M1 | Hard-coded Mapbox token fallback | MEDIUM | P1 | Masks a misconfig; silently broken map |
+| M2 | Undocumented TURN secrets | MEDIUM | P2 | Silent STUN-only deploys |
+| M4 | Unshaped `payload` | MEDIUM | P2 | Malformed payloads pass the size cap |
+| M5 | Dependency CVEs | MEDIUM | P2 | Low real-world reach; tracked |
+
+Plus one cross-cutting deliverable the repo lacked entirely: **CI as a merge gate.**
+
+---
+
+## What We Fixed
+
+### The key fix — a server-issued capability token
+
+The whole CRITICAL cluster closes with one mechanism. Crucially, it is a **capability, not an account** — it carries no identity, so the app stays anonymous.
+
+- **`/api/join` mints a fresh `crypto.randomUUID()` token on every join** (rotate-on-join), stores it in a new **`Presence.token`** column (`NOT NULL`), and returns it to the client **exactly once**.
+- **`poll` / `leave` / `signal` / `turn-credentials` verify the token before *any* side effect.** The 401 fires *before* the heartbeat, the reap, the peer-list read, the mailbox drain, the delete, or the Cloudflare call — so an unauthenticated request changes nothing and learns nothing. In `/api/poll` the order is explicit:
+
+```typescript
+// Verify the capability token BEFORE any heartbeat / reap / read. A missing
+// row or a token mismatch is unauthenticated: do nothing.
+const owner = await prisma.presence.findUnique({
+  where: { id },
+  select: { token: true },        // ← token is the ONLY field selected here
+});
+if (!verifyToken(owner, token)) {
+  return Response.json({ error: "unauthorized" }, { status: 401 });
+}
+```
+
+- **Verification is constant-time** (`lib/auth.ts`, `verifyToken()`), using `crypto.timingSafeEqual` — but with a length guard *first*, because `timingSafeEqual` throws on unequal-length buffers:
+
+```typescript
+if (stored.length !== provided.length) {
+  return false;                   // length-guard BEFORE timingSafeEqual (which throws)
+}
+return timingSafeEqual(stored, provided);
+```
+
+- **The token never leaks.** The peer list select stays `{ id, lat, lng, busy }` — the token is deliberately *not* selected, so poll can never return it to other peers. It is never logged and never placed in an error body.
+- **Transport (stakeholder ruling):** the token rides in the **body or query param**, never a custom header — because `leave` uses `navigator.sendBeacon`, which can't set headers. So `poll` and `turn-credentials` take `?id=&token=`; `signal` and `leave` carry it in the JSON body.
+
+### H1 — TURN credentials gated and short-lived
+
+`/api/turn-credentials` is now **token-gated** (no Cloudflare call happens without a valid token — the 401 fires first), and the TTL is cut from **86400s to 600s**. The TTL was reconciled with the existing `Cache-Control: private, max-age=300`: 300 < 600, so a cached credential can never be handed out already expired.
+
+```typescript
+// 24h → 10min. Must stay safely GREATER than the Cache-Control max-age (300s)
+// so a cached credential is never served already-expired.
+const TURN_CRED_TTL_SECONDS = 600;
+```
+
+### H2 — Postgres-backed, fail-open, pool-safe rate limiter
+
+A fixed-window limiter (`lib/ratelimit.ts`, new **`RateLimit`** table with composite PK `(key, route, window)`) on `join` / `signal` / `poll`. Two stakeholder-binding properties are designed in, not bolted on:
+
+- **FAIL-OPEN** — any DB error returns `{ allowed: true }`. The limiter is abuse mitigation, not an authz control (the token is what gates access), so it must never be able to lock out a real user.
+- **POOL-SAFE** — a single parameterized upsert, **no transactions**, so it can't exhaust the ~10-connection pool under the 1500ms poll cadence.
+
+```typescript
+} catch {
+  // Fail open — never throw, never log the key.
+  return { allowed: true };
+}
+```
+
+- **The key is sha256-hashed** before it touches the table, so no raw id or token is ever persisted in `RateLimit`.
+- **Thresholds** (10s window): poll **30**, signal **60**, join **10**. The poll cadence is 1.5s → ~6–7 polls per window, so a normal client sits at roughly **4x headroom** and is never throttled.
+- **Counters are reaped lazily inside `/api/poll`** (no cron), consistent with Phase 1's presence/signal reaping.
+
+### H3 — Security headers and CSP (`next.config.ts`)
+
+A full header set applied to every route: **CSP**, **HSTS** (`max-age=63072000; includeSubDomains; preload`), **X-Frame-Options: DENY**, **X-Content-Type-Options: nosniff**, **Referrer-Policy: no-referrer**, and a **Permissions-Policy** scoping `camera`/`microphone`/`geolocation` to `self` (the app needs all three, so they're allowed same-origin rather than disabled).
+
+The CSP was authored as explicit, auditable directives. The non-obvious part — and a stakeholder *verification condition* — is that `connect-src` deliberately allows Mapbox plus the Cloudflare TURN/STUN hosts, with `worker-src blob:` and `media-src blob:`, or the map and relayed calls would break:
+
+```
+connect-src 'self' https://*.mapbox.com ... stun: turn: turns: \
+  stun:stun.cloudflare.com:3478 turn:turn.cloudflare.com:3478 turns:turn.cloudflare.com:443
+worker-src 'self' blob:   # Mapbox GL runs its renderer in a blob:-backed worker
+media-src 'self' blob:    # WebRTC media streams are exposed as blob: URLs
+```
+
+### M-tier hardening
+
+- **M3** — a unified `lib/validate.ts` `isValidId` (string, 8–64 chars, conservative charset) is now applied to **every** id-bearing route: `poll`, `leave`, `signal` (both `fromId` and `toId`), and `join`.
+- **M4** — a bounded `payload` check: string, 64KB cap, and a valid `type` enum.
+- **M1** — removed the hard-coded Mapbox fallback so a missing token surfaces instead of rendering a broken map.
+- **M2** — documented `CLOUDFLARE_TURN_TOKEN_ID` and `CLOUDFLARE_TURN_API_TOKEN` as **server-side only** in `.env.example`.
+- **M5** — dependency CVEs tracked (a non-blocking `npm audit` in CI) rather than force-fixed; none are practically exploitable here.
+
+### Client (`app/page.tsx`, `lib/api.ts`, `lib/webrtc.ts`)
+
+The client **captures the token from `join`**, holds it in a ref for the session, and threads it into every `poll` / `signal` / `leave` / `turn` call. The interesting part is the **401 recovery**: a 401 re-mints the token via re-join, but with **exponential backoff** and a **give-up ceiling** — after 5 consecutive failures the client shows a "Session expired, reload" notice rather than retrying. A persistent 401 therefore degrades to a single message instead of a request storm.
+
+### CI (`.github/workflows/ci.yml`)
+
+The merge gate the repo never had: on push and PR, **install → lint → typecheck → test → build**, plus a non-blocking `npm audit`. CD stays on Vercel (native). One deployment gotcha: the build needs a dummy `DATABASE_URL` because `lib/prisma.ts` throws at module load if it's absent.
+
+---
+
+## A Note on the Merge Conflict
+
+Phase 2 merged to `main` while this branch was in flight, and it had also touched `WorldMap.tsx`. The conflict resolved cleanly: Phase 2 had already replaced the placeholder Mapbox token with `?? ""` (which satisfies **M1**) and kept its `peerColor` refactor, so `main`'s side was taken there. No security work was lost.
+
+---
+
+## Verification
+
+- **Code review:** APPROVE WITH NITS — no blockers.
+- **Security re-audit:** **SHIP.** Every CRITICAL (C1–C3), HIGH (H1–H3), and MEDIUM (M1–M4) verified **CLOSED against the actual code** — the 401 was confirmed to fire *before* every side effect on every gated route. Two residual **LOW** findings were knowingly accepted:
+  - The CSP still uses `'unsafe-inline'`/`'unsafe-eval'` on `script-src` (no live XSS sink exists today; the nonce pipeline is Phase 4 work).
+  - A 400-vs-401 id oracle (a missing row 401s, an invalid id 400s) — negligible over a 122-bit UUID space.
+- **Tests:** the suite grew from **24 (Phase 2) to 77 passing** — covering token verification, input validation, fail-open rate limiting, per-route auth-gating, client token threading, and the new `join` route. `tsc` clean, lint clean, production build succeeds.
+- **Schema:** `Presence.token` added + new `RateLimit` table, via migration `20260613121000_phase3_token_and_ratelimit`.
+
+---
+
+## Phase 3 Change Summary
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `lib/auth.ts` (new) | `verifyToken()` — constant-time compare, length-guarded | One verification path; can't leak timing or throw on bad input |
+| `app/api/join/route.ts` | Mint + return a `crypto.randomUUID()` token per join (rotate-on-join) | The capability that proves ownership without an account |
+| `poll` / `leave` / `signal` / `turn-credentials` | 401 before any side effect; token never selected into peer list | Close C1–C3 + H1 with one control; the public id is no longer proof |
+| `lib/ratelimit.ts` + `RateLimit` table (new) | Fixed-window, fail-open, pool-safe, sha256-keyed limiter on join/signal/poll | Mitigates DoS without ever locking out real users or draining the pool |
+| `next.config.ts` | CSP + HSTS + X-Frame-Options/nosniff/Referrer/Permissions-Policy | Clickjacking + XSS hardening; CSP tuned so Mapbox/TURN still work |
+| `lib/validate.ts` (new) | `isValidId` (8–64, charset) on every id-bearing route; bounded `payload` | Consistent boundary; no oversized/unshaped input reaches the DB |
+| `app/api/turn-credentials/route.ts` | Token-gated; TTL 86400s → 600s; reconciled with 300s cache | No free billed creds; cached cred never served expired |
+| `app/page.tsx` / `lib/api.ts` / `lib/webrtc.ts` | Capture + thread the token; 401 → backoff re-join with give-up ceiling | Auth on every call; a persistent 401 can't become a request storm |
+| `.env.example` | Document `CLOUDFLARE_TURN_*` as server-side only | No more silent STUN-only deploys (M2) |
+| `.github/workflows/ci.yml` (new) | install → lint → typecheck → test → build + non-blocking `npm audit` | The merge gate the repo lacked; CD stays on Vercel |
+
+**Total:** 4 CRITICAL, 3 HIGH, and the M-tier findings closed; tests 24 → 77; one schema migration; CI added.
+**Risk:** Low — the gating is additive and fail-open where it must be; all tests green, re-audit verdict SHIP.
+
+**Deferred to Phase 4 (noted, not done):**
+- Tighten the CSP to a **nonce/hash pipeline** and drop `'unsafe-eval'` once Mapbox GL's worker requirement is confirmed.
+- **TURN credential re-fetch (ICE restart)** for calls that outlive the 600s TTL — there is already a `TODO` for this in `lib/webrtc.ts`.
+
+**Phase 3 deliverable:** A coordination API that can be shown to strangers — every session-altering call proves it owns the session via an anonymous capability token, billed and abuse-prone routes are gated and rate-limited, the app ships clickjacking/XSS headers around its camera and mic, and a CI merge gate stands behind it all — with no regression to the Phase 1 functionality or Phase 2 polish.
