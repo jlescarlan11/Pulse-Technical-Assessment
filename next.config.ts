@@ -5,10 +5,11 @@ import type { NextConfig } from "next";
 //   - Mapbox GL loads tiles/sprites/glyphs over https from *.mapbox.com,
 //     injects styles inline, and runs its renderer in a web worker created from
 //     a blob: URL (hence worker-src blob:).
-//   - WebRTC negotiates over STUN/TURN; browsers match ICE server URLs against
-//     connect-src, so the stun:/turn:/turns: endpoints MUST be listed there or
-//     relayed calls are blocked. We connect to Google STUN plus the Cloudflare
-//     Realtime TURN/STUN endpoints (turn.cloudflare.com / stun.cloudflare.com).
+//   - WebRTC ICE (STUN/TURN) is NOT governed by CSP connect-src — the spec
+//     exempts ICE negotiation from the fetch directives. Listing stun:/turn:
+//     scheme sources only produces "invalid source" console warnings and is
+//     otherwise ignored, so they are deliberately omitted; relayed calls and
+//     ICE gathering still work without them.
 const cspDirectives = [
   "default-src 'self'",
   // Next.js inlines a small bootstrap script; Mapbox GL may evaluate code at
@@ -19,9 +20,9 @@ const cspDirectives = [
   "style-src 'self' 'unsafe-inline'",
   // Mapbox tiles/sprites (https), plus data:/blob: for generated images.
   "img-src 'self' data: blob: https://*.mapbox.com",
-  // Coordination API (self) + Mapbox endpoints + WebRTC STUN/TURN. The scheme
-  // entries (stun:/turn:/turns:) cover ICE candidate gathering.
-  "connect-src 'self' https://*.mapbox.com https://api.mapbox.com https://events.mapbox.com stun: turn: turns: stun:stun.l.google.com:19302 stun:stun.cloudflare.com:3478 stun:stun.cloudflare.com:53 turn:turn.cloudflare.com:3478 turns:turn.cloudflare.com:5349 turns:turn.cloudflare.com:443",
+  // Coordination API (self) + Mapbox endpoints. WebRTC STUN/TURN is exempt from
+  // connect-src (see note above), so no stun:/turn: entries belong here.
+  "connect-src 'self' https://*.mapbox.com https://api.mapbox.com https://events.mapbox.com",
   // Mapbox GL renderer runs in a blob:-backed worker.
   "worker-src 'self' blob:",
   // WebRTC media streams are exposed as blob: object URLs.
