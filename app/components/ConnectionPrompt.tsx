@@ -63,28 +63,29 @@ export default function ConnectionPrompt({
         className="animate-scale-in glass w-full max-w-sm rounded-2xl p-7 text-center"
         onClick={(e) => e.stopPropagation()}
       >
-        {/* Identity orb — an incoming signal in the peer's colour */}
-        <div className="relative mx-auto mb-5 flex h-20 w-20 items-center justify-center">
+        {/* Identity orb — an incoming signal in the peer's colour.
+            A small, contained halo hugs the orb rather than sweeping the card. */}
+        <div className="relative mx-auto mb-5 flex h-14 w-14 items-center justify-center">
           <span
-            className="absolute inset-0 rounded-full"
+            className="absolute h-12 w-12 rounded-full"
             style={{
-              animation: "sonar 2.4s var(--ease-calm) infinite",
-              border: `2px solid ${accent}`,
+              animation: "halo 2.8s var(--ease-calm) infinite",
+              border: `1.5px solid ${accent}`,
             }}
           />
           <span
-            className="absolute inset-0 rounded-full"
+            className="absolute h-12 w-12 rounded-full"
             style={{
-              animation: "sonar 2.4s var(--ease-calm) infinite",
-              animationDelay: "1.2s",
-              border: `2px solid ${accent}`,
+              animation: "halo 2.8s var(--ease-calm) infinite",
+              animationDelay: "1.4s",
+              border: `1.5px solid ${accent}`,
             }}
           />
           <span
-            className="relative flex h-14 w-14 items-center justify-center rounded-full text-ink-950"
+            className="relative flex h-12 w-12 items-center justify-center rounded-full text-ink-950"
             style={{
               background: `radial-gradient(circle at 35% 30%, #fff, ${accent} 75%)`,
-              boxShadow: `0 0 28px -4px ${accent}`,
+              boxShadow: `0 0 22px -6px ${accent}`,
             }}
           >
             {variant === "video" ? <VideoIcon /> : <SignalIcon />}
