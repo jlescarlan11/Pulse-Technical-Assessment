@@ -995,6 +995,69 @@ Built through the full subagent pipeline: `project-manager` → `stakeholder` (g
 - **Tests: 98 passing** (up from Phase 3's 77), including `setOutgoingVideoEnabled()` — the protective primitive — and the away-state UI matrix (only-peer-away / only-local-away / both-away, plus the call-start fail-closed case). `tsc` clean, lint clean, production build succeeds.
 - Transparently: the `page.tsx` presence engine was **once lost to an editing mistake and reconstructed from the spec + review notes.** The recovery was clean — it was re-reviewed and the suite is green — but it's worth recording that it happened.
 
+> The rest of Phase 4 was built on the same branch (`feature/phase-4-privacy-shield`), iterating on this base. The four follow-on pieces below each went through the same pipeline; the running numbers in the closing summary reflect the whole arc.
+
+---
+
+## Iteration: Live Self-View (clone-and-gate)
+
+**The problem, found in real use.** The first Reciprocal Video version gated the **shared** camera track. That was correct for the *peer's* protection, but it had an unintended local cost: when the stranger stepped away and we cut our own outgoing video, our **own self-view went black too.** In testing this read as a bug — *"why did my camera turn off? I'm right here"* — and it quietly undermined the feature's honesty, because the present user looked punished for the absent peer's absence.
+
+**The fix — split the track.** `startVideo()` now sends a `clone()` of the camera video track and gates **only the clone** (`sentVideoTrack`, born `enabled = false` — fail-closed). The **original** track stays in `localStream` and drives the local `<video>` self-view, which is **never** disabled. A clone shares the same camera source but carries its own independent `.enabled`, so the transmitted feed can go black without ever darkening the local preview. Net effect: **the present user always sees themselves**, while the absent peer still receives black frames — identical protection on the wire, none of the local confusion.
+
+`VideoPanel` followed: instead of a black "Paused" box, the self-view now shows the **live** local preview with a compact **"Not shared"** badge, so the user can see both that they're on camera *and* that nothing clear is currently going out.
+
+**Security re-audit.** Splitting the track touches the protective core, so this got a focused re-review. No clear-frame leak path: only the gated clone is ever attached to an `RTCRtpSender`; it is born disabled; `setOutgoingVideoEnabled()` still iterates the video senders for defense in depth; and `stopVideo()` stops **both** the original and the clone on teardown (the clone holds its own handle on the camera source). Verdict: **ship.** Files: `lib/webrtc.ts` (`sentVideoTrack` clone + gate), `app/components/VideoPanel.tsx`.
+
+---
+
+## Follow-on: UI/UX Pass
+
+Driven by a full `ui-ux-critic` audit of every surface, not a cosmetic polish. Shipped in three batches.
+
+**Batch 1 — Map accessibility (the most serious finding).** The core action of the whole app — tapping a stranger's dot to say hello — was a ~15px, pointer-only, **keyboard-unreachable** target. That's an action-blocking accessibility failure, not a nicety. Fixes:
+- Each dot is now a **transparent 44px button** wrapped around the ~15px visible core (meets the touch-target minimum without changing the visual), fully **keyboard- and screen-reader-operable.**
+- The **"N signals nearby"** chip became an accessible **disclosure list** of the nearby signals (Escape and outside-click close it; focus returns to the chip on close).
+- Added a **"Tuning in…"** map loading state, a first-entry **"Tap a signal to say hello"** coach hint, and a **zero-peers reassurance card** so an empty map reads as *quiet*, not *broken*.
+
+**Batch 2 — Seam / feedback states.** The gaps between states are where a stranger app feels unreliable:
+- The **incoming connection prompt now auto-expires ~2s before** the requester's 30s timeout, so a late "Connect" can't accept into a peer the other side has already torn down.
+- Transient notices were **raised above panels (`z-50`)** so they're never occluded by the video/chat surfaces.
+- The **"Session expired"** message became a **persistent danger card with a real Reload button**, distinct from transient toasts — a terminal state should not look like a notification that fades.
+
+**Batch 3 — Panel polish.**
+- The **"Not shared"** PiP badge collapsed from a 4-line wrap to **one compact pill.**
+- The pre-call video wait now **escalates after ~9s** ("Still waiting — they may be having camera trouble") so a stall is explained rather than silent.
+- `ChatPanel`'s **"Say hello."** empty state only appears **once connected**; during the handshake it shows a quiet **"Connecting…"** body instead of inviting a message into a channel that isn't open yet.
+
+---
+
+## Follow-on: Identity — Call-Signs
+
+**The problem.** Strangers were distinguishable only by their `peerColor`. Color is unspeakable ("the blue one" breaks down with two blues), unmemorable across a session, and **invisible to color-blind users** — so the only identity signal failed exactly the people who most need a non-color cue.
+
+**What it is.** A new `lib/callsign.ts` derives a deterministic two-word **"Adjective Noun"** handle (e.g. *"Quiet Fox"*) from `peerId`. It hashes the id with **FNV-1a** (the same hashing voice as `peerColor`), then takes **two different 6-bit slices** — low bits → adjective, high bits → noun — into two curated **64-entry** atmospheric wordlists (`& 63`, so no modulo bias). It is pure and synchronous — no storage, no randomness, no `Date` — so the same id always yields the same handle.
+
+**Deliberate constraints, all enforced in code:**
+- The two wordlists are **disjoint**, so a same-word pairing like *"Dusk Dusk"* is impossible by construction — a handle never looks like a bug.
+- **"Signal" / "Beacon" are excluded** from the words, so a handle can never collide with the app's own vocabulary or with the `"Quiet Signal"` fallback used for an empty/undefined id.
+- It is **paired with, never replaces, `peerColor`.** Uniqueness is the color's job, so there is **intentionally no runtime collision handling** — call-signs are *allowed* to collide, and that's the design, not a gap.
+- It is **ephemeral per session** and implies **no account** — consistent with Pulse's anonymity.
+
+Shown consistently in the **map peer-list**, the **ConnectionPrompt**, and the **ChatPanel header**, so the same stranger reads as the same call-sign everywhere.
+
+**Also in this batch (smaller `ui-ux-critic` items):** the EntryGate **reduced-motion beacon** now gives the rings a resting opacity so they don't vanish entirely under `prefers-reduced-motion` (matching what VideoPanel already did); **"End chat" vs "End video"** as a deliberate severity pair; and an **EntryGate CTA min-width** so the label swap doesn't reflow the button. The proposed **mono-tracking sweep was deliberately dropped** as imperceptible churn — not worth the diff. This batch also established the **first component tests** (RTL / jsdom), including **keyboard coverage of the map peer-list.**
+
+---
+
+## Follow-on: Live Typing Indicator
+
+**What it is.** A `{ t: "typing", on }` message rides the **existing WebRTC data channel** — ephemeral, never stored, **no API, no DB** — consistent with the same privacy model as presence. `lib/webrtc.ts` gained `sendTyping()`, an `onTyping` callback, and a guarded inbound branch (`msg.t === "typing" && typeof msg.on === "boolean"`). `page.tsx` holds `peerTyping`, and **clears it on any incoming message and on teardown**, so a typing state can never leak across peers.
+
+`ChatPanel` shows a **"{call-sign} is typing…"** bubble with breathing dots in the **peer's color** (reduced-motion → static dots; `aria-live="polite"` for screen readers). The composer announces typing **on input, throttled (~1.5s)** with a **~2.5s idle retract** — and it also retracts on **send / empty field / unmount**, and **never fires while disconnected** (`safeSend` no-ops on a closed channel, so it's lifecycle-safe regardless).
+
+**One nice refinement:** on an empty thread, the **"Say hello."** empty state **yields to the typing indicator**, so the very first moment of a chat — the stranger starting to type — isn't cluttered by the prompt that's about to be answered.
+
 ---
 
 ## Phase 4 Change Summary
@@ -1002,12 +1065,16 @@ Built through the full subagent pipeline: `project-manager` → `stakeholder` (g
 | Area | Change | Thinking |
 |------|--------|----------|
 | `lib/webrtc.ts` — `PeerControl` | Added `presence-present` / `presence-away` control messages | Presence rides the existing data channel; no new API or DB |
-| `lib/webrtc.ts` — `setOutgoingVideoEnabled()` (new) | Toggle `track.enabled` (local + sender), no renegotiation | The reliable protective primitive; a blur can't run in a hidden tab |
+| `lib/webrtc.ts` — `setOutgoingVideoEnabled()` (new) | Toggle `track.enabled` (clone + sender), no renegotiation | The reliable protective primitive; a blur can't run in a hidden tab |
+| `lib/webrtc.ts` — `sentVideoTrack` clone | Send a `clone()` of the camera track and gate only the clone; original stays live for the self-view | Protect the peer without blacking out the present user's own preview |
 | `app/page.tsx` — mutual-presence engine | `visibilitychange`/`pagehide` detection, 500ms away-debounce, 150ms resume, 2s/4s fail-closed heartbeat, immediate-present on start, reset-on-teardown | Cut instantly, resume carefully; a dropped channel can never leak a feed |
-| `app/components/VideoPanel.tsx` | Honest "stepped away / tab inactive" overlays + away-state matrix; `peerHasBeenPresent` latch; HUD "Away" pill; screen-reader announcements | The claim is "visible only while they are too" — never "looked away," never anti-screenshot |
+| `app/components/VideoPanel.tsx` | Honest "stepped away / tab inactive" overlays + away-state matrix; `peerHasBeenPresent` latch; live self-view + compact "Not shared" pill; reduced-motion beacon | The claim is "visible only while they are too"; the present user always sees themselves |
+| `lib/callsign.ts` (new) | Deterministic FNV-1a two-word "Adjective Noun" call-sign from `peerId`; disjoint 64-word lists; no collision handling | A speakable, color-blind-safe identity *paired with* peerColor; uniqueness stays the color's job |
+| `WorldMap`/`ConnectionPrompt`/`ChatPanel` — accessibility & identity | 44px keyboard-operable dots, accessible nearby-signals disclosure, map loading/coach/zero states; call-sign shown everywhere; severity-paired End controls | The core action must be keyboard-reachable; the same stranger reads the same everywhere |
+| `lib/webrtc.ts` + `ChatPanel` — typing indicator | `sendTyping()`/`onTyping` over the data channel; throttled announce + idle retract; "{call-sign} is typing…" bubble | A live sign of life with the same ephemeral, no-DB model as presence |
 
-**Total:** 1 new protective primitive + 2 new control messages + the presence engine and its UI; tests 77 → 98; no new API route, no schema change.
-**Risk:** Low — additive to the video path, fail-closed by design, audio/chat untouched, chat-only calls unaffected; all tests green, code review APPROVE, QA no-blockers.
+**Total:** Reciprocal Video (clone-and-gate self-view + the mutual-presence engine and its UI) + a full UI/UX accessibility pass + the call-sign identity layer + a live typing indicator — all over the existing data channel, with **no new API route and no schema change**. Tests grew across the arc from **77 (end of Phase 3) → 98 (Reciprocal Video) → 140 passing** (the follow-ons, including the first RTL/jsdom component tests). `tsc` clean, lint clean, production build clean.
+**Risk:** Low — additive to the video/chat path, fail-closed by design, audio/chat untouched, chat-only calls unaffected; all tests green, code review APPROVE, QA no-blockers. Shipped on `feature/phase-4-privacy-shield` (PR #7).
 
 **What I'd do next (with more time):**
 - **Make the presence engine unit-testable.** Extract a *pure presence reducer* into `lib/` so the heartbeat / debounce / fail-closed gate logic can be tested without rendering the page. Today it's covered by the `setOutgoingVideoEnabled` primitive test plus manual QA; `lib/presence.ts` currently holds only the shared cadence constants, which is the natural home for the reducer.
@@ -1016,4 +1083,4 @@ Built through the full subagent pipeline: `project-manager` → `stakeholder` (g
 - **A richer return-from-away affordance** (a clearer "they're back" moment than the feed simply resuming).
 - **Explore gaze / face-presence detection (ML)** as an honest *stronger* signal than tab focus — with the same hard honesty rule: only claim what it actually verifies.
 
-**Phase 4 deliverable:** A self-designed, mutual-presence privacy feature that makes Pulse both safer and more alive — clear video flows only while both strangers are present, enforced at the media source and fail-closed against dropped channels, with copy that claims exactly what it delivers and nothing it can't — built with no new API, no schema change, and no regression to Phases 1–3.
+**Phase 4 deliverable:** A self-designed "make it alive *and* safe" arc — Reciprocal Video (clear video flows only while both strangers are present, enforced at the media source on a gated clone so your own self-view never goes dark, fail-closed against dropped channels), a full UI/UX accessibility pass that makes the core action keyboard-reachable, speakable color-blind-safe **call-sign** identity, and a live **typing indicator** — every piece built on the existing data channel with copy that claims exactly what it delivers, no new API, no schema change, and no regression to Phases 1–3.
