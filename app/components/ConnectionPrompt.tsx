@@ -64,17 +64,17 @@ export default function ConnectionPrompt({
         onClick={(e) => e.stopPropagation()}
       >
         {/* Identity orb — an incoming signal in the peer's colour.
-            A small, contained halo hugs the orb rather than sweeping the card. */}
-        <div className="relative mx-auto mb-5 flex h-14 w-14 items-center justify-center">
+            The halo radiates from the orb but stays within the card. */}
+        <div className="relative mx-auto mb-7 flex h-14 w-14 items-center justify-center">
           <span
-            className="absolute h-12 w-12 rounded-full"
+            className="absolute h-14 w-14 rounded-full"
             style={{
               animation: "halo 2.8s var(--ease-calm) infinite",
               border: `1.5px solid ${accent}`,
             }}
           />
           <span
-            className="absolute h-12 w-12 rounded-full"
+            className="absolute h-14 w-14 rounded-full"
             style={{
               animation: "halo 2.8s var(--ease-calm) infinite",
               animationDelay: "1.4s",
@@ -82,7 +82,7 @@ export default function ConnectionPrompt({
             }}
           />
           <span
-            className="relative flex h-12 w-12 items-center justify-center rounded-full text-ink-950"
+            className="relative flex h-14 w-14 items-center justify-center rounded-full text-ink-950"
             style={{
               background: `radial-gradient(circle at 35% 30%, #fff, ${accent} 75%)`,
               boxShadow: `0 0 22px -6px ${accent}`,
