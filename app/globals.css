@@ -25,7 +25,177 @@ body {
   font-family: Arial, Helvetica, sans-serif;
 }
 
-/* Live user dots on the map */
+/* ============================================================================
+   ANIMATION KEYFRAMES — Reusable animation library for Pulse
+   ============================================================================ */
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes fade-in-up {
+  from {
+    opacity: 0;
+    transform: translateY(12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in-down {
+  from {
+    opacity: 0;
+    transform: translateY(-12px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes scale-in {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes slide-in-right {
+  from {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateX(0);
+  }
+}
+
+@keyframes slide-out-right {
+  from {
+    opacity: 1;
+    transform: translateX(0);
+  }
+  to {
+    opacity: 0;
+    transform: translateX(20px);
+  }
+}
+
+@keyframes pulse-ring {
+  0% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4);
+  }
+  70% {
+    box-shadow: 0 0 0 8px rgba(255, 255, 255, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+  }
+}
+
+@keyframes glow-pulse {
+  0%, 100% {
+    box-shadow: 0 0 20px rgba(16, 185, 129, 0.5), inset 0 0 20px rgba(16, 185, 129, 0.1);
+  }
+  50% {
+    box-shadow: 0 0 30px rgba(16, 185, 129, 0.8), inset 0 0 30px rgba(16, 185, 129, 0.2);
+  }
+}
+
+@keyframes spin-smooth {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes button-press {
+  0% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(0.95);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ============================================================================
+   UTILITY CLASSES — Reusable animation utilities
+   ============================================================================ */
+
+.animate-fade-in {
+  animation: fade-in 0.3s ease-out;
+}
+
+.animate-fade-in-up {
+  animation: fade-in-up 0.4s ease-out;
+}
+
+.animate-fade-in-down {
+  animation: fade-in-down 0.4s ease-out;
+}
+
+.animate-scale-in {
+  animation: scale-in 0.3s ease-out;
+}
+
+.animate-slide-in-right {
+  animation: slide-in-right 0.3s ease-out;
+}
+
+.animate-slide-out-right {
+  animation: slide-out-right 0.3s ease-in;
+}
+
+.animate-glow-pulse {
+  animation: glow-pulse 2s ease-in-out infinite;
+}
+
+.animate-spin-smooth {
+  animation: spin-smooth 1s linear infinite;
+}
+
+/* Staggered animations for lists */
+.animate-stagger-1 {
+  animation-delay: 0s;
+}
+
+.animate-stagger-2 {
+  animation-delay: 0.05s;
+}
+
+.animate-stagger-3 {
+  animation-delay: 0.1s;
+}
+
+.animate-stagger-4 {
+  animation-delay: 0.15s;
+}
+
+.animate-stagger-5 {
+  animation-delay: 0.2s;
+}
+
+/* ============================================================================
+   LIVE USER DOTS ON THE MAP
+   ============================================================================ */
+
 .pulse-dot {
   width: 14px;
   height: 14px;
@@ -35,11 +205,15 @@ body {
   padding: 0;
   box-shadow: 0 0 0 rgba(255, 255, 255, 0.5);
   animation: pulse-ring 2s ease-out infinite;
-  transition: transform 0.1s ease;
+  transition: transform 0.15s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
 
 .pulse-dot:hover {
   transform: scale(1.3);
+}
+
+.pulse-dot:active {
+  animation: button-press 0.2s ease-out;
 }
 
 /* The user's own "you are here" pin — small, sized like the dots. */
@@ -49,6 +223,7 @@ body {
   line-height: 1;
   cursor: default;
   filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+  animation: fade-in 0.5s ease-out;
 }
 
 .pulse-me-label {
@@ -66,14 +241,146 @@ body {
   white-space: nowrap;
 }
 
-@keyframes pulse-ring {
-  0% {
-    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0.4);
+/* ============================================================================
+   PAGE TRANSITION & LAYOUT ANIMATIONS
+   ============================================================================ */
+
+main {
+  animation: fade-in 0.3s ease-out;
+}
+
+/* Chat panel entrance from the right */
+.chat-panel-enter {
+  animation: slide-in-right 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Modal backdrop & content */
+.modal-backdrop {
+  animation: fade-in 0.2s ease-out;
+}
+
+.modal-content {
+  animation: scale-in 0.3s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* Notice/toast animations */
+.notice-enter {
+  animation: fade-in-down 0.3s ease-out;
+}
+
+.notice-exit {
+  animation: fade-in-up 0.2s ease-in reverse;
+}
+
+/* ============================================================================
+   RESPONSIVE ADJUSTMENTS FOR MOBILE
+   ============================================================================ */
+
+@media (max-width: 767px) {
+  /* Slightly faster animations on mobile for snappier feel */
+  .animate-fade-in,
+  .animate-fade-in-up,
+  .animate-fade-in-down,
+  .animate-scale-in,
+  .animate-slide-in-right {
+    animation-duration: 0.25s;
   }
-  70% {
-    box-shadow: 0 0 0 8px rgba(255, 255, 255, 0);
+
+  /* Reduce stagger delays on mobile */
+  .animate-stagger-2 {
+    animation-delay: 0.03s;
   }
-  100% {
-    box-shadow: 0 0 0 0 rgba(255, 255, 255, 0);
+
+  .animate-stagger-3 {
+    animation-delay: 0.06s;
   }
+
+  .animate-stagger-4 {
+    animation-delay: 0.09s;
+  }
+
+  .animate-stagger-5 {
+    animation-delay: 0.12s;
+  }
+}
+
+/* ============================================================================
+   FOCUS STATES & INTERACTIVE ELEMENT STYLING
+   ============================================================================ */
+
+button,
+input,
+a {
+  /* Smooth all transitions on interactive elements */
+  transition-property: all;
+  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
+  transition-duration: 150ms;
+}
+
+/* Visible focus rings for accessibility */
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 2px solid #10b981;
+  outline-offset: 2px;
+}
+
+/* Remove default browser focus outline, we'll use outline instead */
+button:focus {
+  outline: none;
+}
+
+input:focus {
+  outline: none;
+}
+
+/* ============================================================================
+   DARK MODE ENHANCEMENTS
+   ============================================================================ */
+
+@media (prefers-color-scheme: dark) {
+  /* Pulsing glow effect on CTAs in dark mode */
+  .cta-glow {
+    position: relative;
+  }
+
+  .cta-glow::before {
+    content: "";
+    position: absolute;
+    inset: -2px;
+    border-radius: inherit;
+    background: linear-gradient(45deg, #10b981, #6ee7b7, #10b981);
+    background-size: 200% 200%;
+    opacity: 0;
+    animation: glow-pulse 2s ease-in-out infinite;
+    z-index: -1;
+    pointer-events: none;
+  }
+
+  .cta-glow:hover::before {
+    opacity: 0.3;
+  }
+}
+
+/* ============================================================================
+   LOADING STATE SPINNER
+   ============================================================================ */
+
+.spinner {
+  width: 20px;
+  height: 20px;
+  border: 2px solid rgba(255, 255, 255, 0.2);
+  border-top: 2px solid #ffffff;
+  border-radius: 50%;
+  animation: spin-smooth 0.8s linear infinite;
+}
+
+.spinner-small {
+  width: 16px;
+  height: 16px;
+}
+
+.spinner-large {
+  width: 32px;
+  height: 32px;
 }

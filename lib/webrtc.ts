@@ -18,6 +18,62 @@ const ICE_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
 
+interface TurnCredentialsResponse {
+  username?: string;
+  credential?: string;
+  urls?: string[];
+}
+
+export async function buildICEConfig(): Promise<RTCConfiguration> {
+  try {
+    const response = await fetch("/api/turn-credentials", {
+      method: "GET",
+      headers: { "Content-Type": "application/json" },
+      signal: AbortSignal.timeout(5000),
+    });
+
+    if (!response.ok) {
+      console.warn(
+        `buildICEConfig: fetch failed with status ${response.status}, falling back to STUN-only`,
+      );
+      return ICE_CONFIG;
+    }
+
+    const data: TurnCredentialsResponse = await response.json();
+
+    if (!data.urls || data.urls.length === 0) {
+      console.warn(
+        "buildICEConfig: TURN credentials missing or invalid, falling back to STUN-only",
+      );
+      return ICE_CONFIG;
+    }
+
+    const iceServers: RTCIceServer[] = [
+      { urls: "stun:stun.l.google.com:19302" },
+    ];
+
+    if (data.username && data.credential) {
+      iceServers.push({
+        urls: data.urls,
+        username: data.username,
+        credential: data.credential,
+      });
+    } else {
+      console.warn(
+        "buildICEConfig: TURN username or credential missing, falling back to STUN-only",
+      );
+      return ICE_CONFIG;
+    }
+
+    return { iceServers };
+  } catch (err) {
+    console.warn(
+      `buildICEConfig: ${err instanceof Error ? err.message : "unknown error"}, falling back to STUN-only`,
+    );
+    return ICE_CONFIG;
+  }
+}
+
 export class PeerSession {
   private pc: RTCPeerConnection;
   private dc: RTCDataChannel | null = null;
@@ -29,10 +85,14 @@ export class PeerSession {
   private readonly cb: PeerCallbacks;
   private pendingCandidates: RTCIceCandidateInit[] = [];
 
-  constructor(initiator: boolean, cb: PeerCallbacks) {
+  constructor(
+    initiator: boolean,
+    cb: PeerCallbacks,
+    iceConfig: RTCConfiguration = ICE_CONFIG,
+  ) {
     this.cb = cb;
     this.polite = !initiator;
-    this.pc = new RTCPeerConnection(ICE_CONFIG);
+    this.pc = new RTCPeerConnection(iceConfig);
 
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {

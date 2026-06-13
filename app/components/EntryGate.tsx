@@ -34,10 +34,12 @@ export default function EntryGate({
   }
 
   return (
-    <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-8 bg-zinc-950 p-6 text-zinc-100">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold tracking-tight">Pulse</h1>
-        <p className="mt-2 max-w-sm text-zinc-400">
+    <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-6 bg-zinc-950 px-4 py-6 text-zinc-100 sm:gap-8 sm:p-6 md:gap-8 animate-fade-in">
+      <div className="text-center animate-fade-in-up">
+        <h1 className="text-5xl font-bold tracking-tight sm:text-6xl md:text-7xl mb-3">
+          Pulse
+        </h1>
+        <p className="mx-auto max-w-sm text-sm text-zinc-400 sm:text-base leading-relaxed">
           A living globe of anonymous strangers. Drop onto the map and connect.
         </p>
       </div>
@@ -45,16 +47,23 @@ export default function EntryGate({
       <button
         onClick={enter}
         disabled={status === "locating"}
-        className="rounded-full bg-emerald-400 px-8 py-3 font-semibold text-zinc-950 transition hover:bg-emerald-300 disabled:opacity-60"
+        className="group relative inline-flex min-h-11 min-w-max items-center justify-center rounded-full bg-emerald-400 px-8 py-3 font-semibold text-zinc-950 transition-all duration-200 hover:bg-emerald-300 hover:shadow-lg hover:shadow-emerald-500/30 disabled:opacity-60 disabled:cursor-not-allowed active:scale-95 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-emerald-400 sm:min-h-12"
       >
-        {status === "locating" ? "Locating…" : "Enter Pulse"}
+        <span className="flex items-center gap-2">
+          {status === "locating" && (
+            <span className="spinner spinner-small"></span>
+          )}
+          {status === "locating" ? "Locating…" : "Enter Pulse"}
+        </span>
       </button>
 
       {status === "error" && (
-        <p className="max-w-sm text-center text-sm text-red-400">{error}</p>
+        <div className="mx-auto max-w-sm rounded-lg bg-red-950/40 border border-red-900/50 p-4 text-center text-sm text-red-300 animate-fade-in-up">
+          {error}
+        </div>
       )}
 
-      <p className="max-w-sm text-center text-xs text-zinc-500">
+      <p className="mx-auto max-w-sm text-center text-xs text-zinc-500 leading-relaxed">
         No sign-up. Your dot is placed 1–3&nbsp;km from your real location.
         Nothing is stored — closing the tab ends everything.
       </p>

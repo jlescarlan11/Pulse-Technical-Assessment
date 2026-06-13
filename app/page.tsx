@@ -7,7 +7,12 @@ import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
 import { join, leave, poll, sendSignal } from "@/lib/api";
-import { PeerSession, type DescType, type PeerControl } from "@/lib/webrtc";
+import {
+  PeerSession,
+  type DescType,
+  type PeerControl,
+  buildICEConfig,
+} from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg } from "@/lib/types";
 
@@ -73,24 +78,30 @@ export default function Home() {
     if (message) showNotice(message);
   }
 
-  function startPeer(peerId: string, initiator: boolean) {
-    const ps = new PeerSession(initiator, {
-      onSignal: (type: DescType, payload: string) => {
-        void sendSignal(sessionId, peerId, type, payload);
-      },
-      onChat: (text) => addMessage(false, text),
-      onControl: (ctrl) => handleControl(ctrl),
-      onRemoteStream: (stream) => setRemoteStream(stream),
-      onConnectionState: (state) => {
-        if (state === "failed") {
-          teardown("Connection failed (network).");
-        }
-      },
-      onChannelOpen: () => {
-        setConn({ kind: "connected", peerId });
-      },
-    });
-    peerRef.current = ps;
+  async function startPeer(peerId: string, initiator: boolean) {
+    try {
+      const iceConfig = await buildICEConfig();
+      const ps = new PeerSession(initiator, {
+        onSignal: (type: DescType, payload: string) => {
+          void sendSignal(sessionId, peerId, type, payload);
+        },
+        onChat: (text) => addMessage(false, text),
+        onControl: (ctrl) => handleControl(ctrl),
+        onRemoteStream: (stream) => setRemoteStream(stream),
+        onConnectionState: (state) => {
+          if (state === "failed") {
+            teardown("Connection failed (network).");
+          }
+        },
+        onChannelOpen: () => {
+          setConn({ kind: "connected", peerId });
+        },
+      }, iceConfig);
+      peerRef.current = ps;
+    } catch (error) {
+      console.error("Failed to start peer:", error);
+      teardown("Connection failed (ICE config).");
+    }
   }
 
   function handleControl(ctrl: PeerControl) {
@@ -153,7 +164,7 @@ export default function Home() {
   function acceptIncoming() {
     if (connRef.current.kind !== "incoming") return;
     const peerId = connRef.current.peerId;
-    startPeer(peerId, false);
+    void startPeer(peerId, false);
     void sendSignal(sessionId, peerId, "accept");
     setConn({ kind: "connecting", peerId });
   }
@@ -222,7 +233,7 @@ export default function Home() {
         const c = connRef.current;
         if (c.kind === "requesting" && c.peerId === sig.fromId) {
           if (requestTimer.current) clearTimeout(requestTimer.current);
-          startPeer(sig.fromId, true);
+          void startPeer(sig.fromId, true);
           setConn({ kind: "connecting", peerId: sig.fromId });
         }
         break;
@@ -316,29 +327,57 @@ export default function Home() {
   const inChat = conn.kind === "connecting" || conn.kind === "connected";
 
   return (
-    <main className="fixed inset-0 overflow-hidden">
-      <WorldMap
-        peers={peers}
-        me={myLocation}
-        onPeerClick={requestConnection}
-        canConnect={conn.kind === "idle"}
-      />
+    <main className="fixed inset-0 overflow-hidden bg-zinc-950 flex flex-col lg:flex-row">
+      {/* Map takes full height on desktop, shares space on mobile */}
+      <div className="relative flex-1 h-1/2 lg:h-full order-1 lg:order-1">
+        <WorldMap
+          peers={peers}
+          me={myLocation}
+          onPeerClick={requestConnection}
+          canConnect={conn.kind === "idle"}
+        />
+      </div>
 
+      {/* Chat panel positions: below map on mobile, right side on desktop */}
+      {inChat && (
+        <div className="absolute inset-x-0 bottom-0 h-1/2 lg:static lg:h-full lg:w-80 lg:flex lg:flex-col lg:order-2 z-20 lg:z-auto">
+          <ChatPanel
+            messages={messages}
+            connected={conn.kind === "connected"}
+            videoBusy={video !== "none"}
+            onSend={(text) => {
+              peerRef.current?.sendChat(text);
+              addMessage(true, text);
+            }}
+            onStartVideo={startVideoRequest}
+            onEnd={endConnection}
+          />
+        </div>
+      )}
+
+      {/* Notices and modals */}
       {notice && (
-        <div className="absolute left-1/2 top-20 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          {notice}
+        <div className="fixed left-1/2 top-4 z-30 -translate-x-1/2 max-w-sm px-4 sm:px-6 notice-enter">
+          <div className="rounded-full bg-zinc-800/95 px-4 py-3 text-sm text-zinc-100 shadow-lg backdrop-blur border border-zinc-700/50">
+            {notice}
+          </div>
         </div>
       )}
 
       {conn.kind === "requesting" && (
-        <div className="absolute left-1/2 top-20 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          <span>Requesting connection…</span>
-          <button
-            onClick={cancelRequest}
-            className="rounded-full bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
-          >
-            Cancel
-          </button>
+        <div className="fixed left-1/2 top-4 z-30 -translate-x-1/2 max-w-sm px-4 sm:px-6 notice-enter">
+          <div className="flex items-center gap-3 rounded-full bg-zinc-800/95 px-4 py-3 text-sm text-zinc-100 shadow-lg backdrop-blur border border-zinc-700/50">
+            <span className="flex items-center gap-2">
+              <span className="spinner spinner-small"></span>
+              Requesting connection…
+            </span>
+            <button
+              onClick={cancelRequest}
+              className="rounded-full bg-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-zinc-600 transition-colors duration-200 min-h-7"
+            >
+              Cancel
+            </button>
+          </div>
         </div>
       )}
 
@@ -352,23 +391,12 @@ export default function Home() {
         />
       )}
 
-      {inChat && (
-        <ChatPanel
-          messages={messages}
-          connected={conn.kind === "connected"}
-          videoBusy={video !== "none"}
-          onSend={(text) => {
-            peerRef.current?.sendChat(text);
-            addMessage(true, text);
-          }}
-          onStartVideo={startVideoRequest}
-          onEnd={endConnection}
-        />
-      )}
-
       {video === "requesting" && (
-        <div className="absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          Waiting for stranger to accept video…
+        <div className="fixed left-1/2 bottom-6 z-30 -translate-x-1/2 max-w-sm px-4 sm:px-6 notice-enter">
+          <div className="flex items-center gap-2 rounded-full bg-zinc-800/95 px-4 py-3 text-sm text-zinc-100 shadow-lg backdrop-blur border border-zinc-700/50">
+            <span className="spinner spinner-small"></span>
+            <span>Waiting for stranger to accept video…</span>
+          </div>
         </div>
       )}
 

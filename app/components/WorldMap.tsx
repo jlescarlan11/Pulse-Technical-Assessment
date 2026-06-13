@@ -127,6 +127,8 @@ export default function WorldMap({
           el.className = "pulse-dot";
           el.style.background = dotColor(peer.id);
           el.title = "Tap to connect";
+          el.type = "button";
+          el.setAttribute("aria-label", `Connect with peer ${peer.id.slice(0, 8)}`);
           el.addEventListener("click", (e) => {
             e.stopPropagation();
             if (canConnectRef.current) onPeerClickRef.current(peer.id);
@@ -136,7 +138,10 @@ export default function WorldMap({
             .addTo(map);
           markers.set(peer.id, marker);
         }
-        marker.getElement().style.opacity = peer.busy ? "0.35" : "1";
+        // Smooth transition for busy state instead of instant opacity change
+        const el = marker.getElement();
+        el.style.transition = "opacity 0.3s cubic-bezier(0.4, 0, 0.2, 1)";
+        el.style.opacity = peer.busy ? "0.35" : "1";
       }
 
       // Drop markers for peers that went offline / got filtered out.
@@ -154,22 +159,25 @@ export default function WorldMap({
   }, [peers, ready]);
 
   return (
-    <div className="absolute inset-0">
+    <div className="absolute inset-0 animate-fade-in">
       <div ref={containerRef} className="h-full w-full bg-zinc-900" />
 
       {!TOKEN && (
         <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
-          <p className="max-w-md rounded-lg bg-zinc-800 p-4 text-sm text-zinc-200">
+          <div className="max-w-md rounded-lg bg-zinc-800/90 p-4 text-sm text-zinc-200 backdrop-blur animate-fade-in-up">
             Set{" "}
-            <code className="text-emerald-400">NEXT_PUBLIC_MAPBOX_TOKEN</code> in{" "}
-            <code>.env</code> to load the map.
-          </p>
+            <code className="text-emerald-400 font-mono">NEXT_PUBLIC_MAPBOX_TOKEN</code> in{" "}
+            <code className="text-emerald-400 font-mono">.env</code> to load the map.
+          </div>
         </div>
       )}
 
-      {/* Online count */}
-      <div className="absolute bottom-4 left-4 rounded-full bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-300 backdrop-blur">
-        {peers.length} online
+      {/* Online count badge */}
+      <div className="absolute bottom-4 left-4 z-10 rounded-full bg-zinc-900/80 px-3 py-2 text-xs font-medium text-zinc-300 backdrop-blur border border-zinc-800/50 shadow-lg transition-all duration-200 hover:bg-zinc-900/95 animate-fade-in-up">
+        <span className="flex items-center gap-2">
+          <span className="inline-block h-2 w-2 rounded-full bg-emerald-400 animate-pulse"></span>
+          {peers.length > 0 ? `${peers.length} online` : "No one nearby"}
+        </span>
       </div>
     </div>
   );
