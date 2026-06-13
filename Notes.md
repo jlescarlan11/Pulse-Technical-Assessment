@@ -431,7 +431,9 @@ All bugs fixed and tested:
 **Symptom:** Two users on different WiFi networks couldn't connect. Same WiFi worked fine. Users saw "network error" or "user decline" messages.
 
 **Root Cause:**  
-File: `/lib/webrtc.ts` (lines 17-19)
+File: `/lib/webrtc.ts`
+
+The ICE configuration only specified a STUN server — no TURN relay:
 
 ```typescript
 // BROKEN CODE:
@@ -451,80 +453,88 @@ const ICE_CONFIG: RTCConfiguration = {
 
 ## How We Fixed It
 
-### Fix #7: Add Cloudflare TURN Server for NAT Traversal
+### Fix #7: Add a Cloudflare TURN Relay for NAT Traversal
 
-**Files Modified:**
-1. `/app/api/turn-credentials/route.ts` (NEW — 102 lines)
-2. `/lib/webrtc.ts` (added `buildICEConfig()` — 57 lines)
-3. `/app/page.tsx` (made `startPeer()` async — 8 lines modified)
+**Files changed:**
+1. `/app/api/turn-credentials/route.ts` (NEW) — server-side endpoint that mints short-lived TURN credentials
+2. `/lib/webrtc.ts` — added `buildICEConfig()`; `PeerSession` accepts an `iceConfig` param
+3. `/app/page.tsx` — `startPeer()` is now async and fetches the ICE config before creating the peer
 
-**Architecture:**
+**Client side** (`lib/webrtc.ts`) — fetch TURN credentials, fall back to STUN-only on any failure:
 
 ```typescript
-// BEFORE:
-const ICE_CONFIG: RTCConfiguration = {
-  iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
-};
-
-// AFTER:
-async function buildICEConfig(): Promise<RTCConfiguration> {
-  const iceServers: RTCIceServer[] = [
-    { urls: "stun:stun.l.google.com:19302" },
-  ];
-  
+export async function buildICEConfig(): Promise<RTCConfiguration> {
   try {
     const res = await fetch("/api/turn-credentials", { signal: AbortSignal.timeout(5000) });
-    if (res.ok) {
-      const { urls, username, credential } = await res.json();
-      iceServers.push({
-        urls: Array.isArray(urls) ? urls : [urls],
-        username,
-        credential,
-        credentialType: "password",
-      });
-    }
-  } catch (e) {
-    console.warn("buildICEConfig: fetch failed, falling back to STUN-only", e);
+    if (!res.ok) return ICE_CONFIG;                       // STUN-only fallback
+    const { urls, username, credential } = await res.json();
+    if (!urls?.length || !username || !credential) return ICE_CONFIG;
+    return {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls, username, credential },
+      ],
+    };
+  } catch {
+    return ICE_CONFIG;                                    // timeout / network / parse error
   }
-  
-  return { iceServers };
 }
 ```
 
-**API Endpoint** (`/api/turn-credentials`):
-- GET handler that calls Cloudflare Realtime API with server-side credentials
-- Returns `{ urls, username, credential }` with 5-minute client-side cache
-- Falls back gracefully (returns 500, but client still has STUN fallback)
-- Requires environment variables:
-  - `CLOUDFLARE_TURN_TOKEN_ID` (Cloudflare account ID)
-  - `CLOUDFLARE_TURN_API_TOKEN` (Cloudflare API token)
+**Server side** (`/api/turn-credentials`) — call Cloudflare's Realtime TURN API with credentials kept server-side, and return only `{ urls, username, credential }` to the client.
 
-**Frontend Integration** (`app/page.tsx`):
-- Made `startPeer()` async
-- Calls `const config = await buildICEConfig()` before creating peer
-- Passes config to `PeerSession` constructor
-- Added try-catch error boundary: if config fails, calls `teardown("Connection failed (ICE config).")`
+> **⚠️ Gotcha — the first attempt hit the wrong Cloudflare endpoint.** The initial implementation guessed the API shape and called a route that does not exist, so the endpoint returned **HTTP 500** in production and the client silently fell back to STUN-only — meaning cross-network *still* failed even after the TURN work shipped. Production logs revealed it:
+>
+> ```
+> Cloudflare API error: {"success":false,"errors":[
+>   {"code":7003,"message":"Could not route to /accounts/.../rtc/config, perhaps your object identifier is invalid?"},
+>   {"code":7000,"message":"No route for that URI"}
+> ]}
+> ```
+>
+> The credentials were valid the whole time — only the URL/contract was wrong. Corrected against the [official docs](https://developers.cloudflare.com/realtime/turn/generate-credentials):
+>
+> | | First attempt (broken) | Correct |
+> |---|---|---|
+> | Host | `api.cloudflare.com/client/v4` | `rtc.live.cloudflare.com/v1` |
+> | Path | `/accounts/{id}/rtc/config` | `/turn/keys/{KEY_ID}/credentials/generate-ice-servers` |
+> | Body | _(none)_ | `{ "ttl": 86400 }` |
+> | Response | expected `{ success, result }` wrapper | bare `{ iceServers: [...] }`, status 201 |
+> | `CLOUDFLARE_TURN_TOKEN_ID` | used as a Cloudflare account ID | it's the TURN **key** ID (goes in the URL path) |
 
-**Expected Behavior:**
+Final working call:
+
+```typescript
+const url = `https://rtc.live.cloudflare.com/v1/turn/keys/${turnKeyId}/credentials/generate-ice-servers`;
+const response = await fetch(url, {
+  method: "POST",
+  headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
+  body: JSON.stringify({ ttl: 86400 }),
+  signal: AbortSignal.timeout(5000),
+});
+// Response: { iceServers: [ {urls:[stun...]}, {urls:[turn...], username, credential} ] }
+// Pick the entry that has username + credential.
+```
+
+**Environment variables** (server-side only, set in Vercel):
+- `CLOUDFLARE_TURN_TOKEN_ID` — the Cloudflare TURN **key ID** (used in the request path)
+- `CLOUDFLARE_TURN_API_TOKEN` — the TURN key API token (Bearer auth)
+
+**Frontend integration** (`app/page.tsx`):
+- `startPeer()` is async; calls `await buildICEConfig()` before creating the peer
+- Wrapped in try-catch — if config building throws, calls `teardown("Connection failed (ICE config).")`
+
+**Expected behavior:**
 - Same-WiFi connections still work (STUN only)
 - Cross-WiFi connections now work (STUN + TURN relay)
-- If TURN fetch fails: gracefully falls back to STUN-only
-- If both fail: user sees "Connection failed" with proper error message
+- If the TURN fetch fails for any reason, the client gracefully falls back to STUN-only
 
 ---
 
 ## How We Found It
 
-### Context Scanner Analysis
-- Identified only STUN server configured in ICE config
-- Root cause: symmetric NAT blocks reflexive candidates on cross-WiFi
-- Solution: TURN server relays traffic when direct P2P fails
-
-### Testing & Verification
-- ✅ 30 automated tests (8 buildICEConfig, 15 API route, 7 integration)
-- ✅ Code review: 2 issues fixed (TypeScript strict mode, redundant field)
-- ✅ QA approved: 5 acceptance criteria met
-- ✅ Build verified: `npm run build` succeeds
+- **Context scan** identified only a STUN server in the ICE config → symmetric NAT blocks reflexive candidates on cross-WiFi → a TURN relay is required.
+- **Production Vercel logs** then exposed the wrong-endpoint bug (Cloudflare error 7003/7000), which we corrected against Cloudflare's official Realtime TURN docs.
 
 ---
 
@@ -533,106 +543,23 @@ async function buildICEConfig(): Promise<RTCConfiguration> {
 | Aspect | Details |
 |--------|---------|
 | **Severity** | CRITICAL (breaks cross-network use case) |
-| **Type** | Missing feature (NAT traversal) |
-| **Files** | 3 files (1 new API route, 2 modified core files) |
-| **Lines Added** | ~167 lines (102 route + 57 webrtc + 8 page) |
-| **Tests** | 30 automated tests with 100% coverage |
-| **Deployment** | Requires Cloudflare TURN credentials in Vercel env vars |
-
----
-
-### Bug #8: Wrong Cloudflare TURN API Endpoint — 500 in Production (CRITICAL)
-
-**Symptom:** After deploying Bug #7's TURN integration, `/api/turn-credentials` returned **HTTP 500** in production. Cross-network connections still failed. Production logs showed:
-
-```
-Cloudflare API response status: 400
-Cloudflare API error response: {"success":false,"errors":[
-  {"code":7003,"message":"Could not route to /accounts/.../rtc/config, perhaps your object identifier is invalid?"},
-  {"code":7000,"message":"No route for that URI"}
-]}
-```
-
-**Root Cause:**
-File: `/app/api/turn-credentials/route.ts`
-
-The initial TURN integration called a **Cloudflare API endpoint that does not exist**. It was based on a guessed/hallucinated API shape rather than the official Cloudflare Realtime TURN docs.
-
-```typescript
-// BROKEN CODE:
-// Wrong host + wrong path; treats the TURN Key ID as a Cloudflare account ID.
-const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/rtc/config`;
-const response = await fetch(url, {
-  method: "POST",
-  headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
-  // ← no request body
-});
-// Also expected a { success, result: { iceServers } } wrapper that this API never returns.
-```
-
-**Impact:**
-- The credentials themselves were valid — the *endpoint* was wrong, so Cloudflare returned error 7003/7000 ("No route for that URI")
-- Every credential fetch 500'd; the client always fell back to STUN-only
-- Cross-network connections kept failing (the exact bug #7 was meant to fix)
-- Misleading: looked like a credentials/config problem, but was a wrong-URL problem
-
----
-
-### Fix #8: Use the Correct Cloudflare Realtime TURN API
-
-**File:** `/app/api/turn-credentials/route.ts`
-
-Verified against the official docs (developers.cloudflare.com/realtime/turn/generate-credentials).
-
-```typescript
-// AFTER:
-// Correct host, path, body, and response parsing.
-const url = `https://rtc.live.cloudflare.com/v1/turn/keys/${turnKeyId}/credentials/generate-ice-servers`;
-const response = await fetch(url, {
-  method: "POST",
-  headers: { Authorization: `Bearer ${apiToken}`, "Content-Type": "application/json" },
-  body: JSON.stringify({ ttl: 86400 }),       // ← required body (TTL in seconds)
-  signal: AbortSignal.timeout(5000),
-});
-// Response is a bare { iceServers: [...] } array (HTTP 201) — no success/result wrapper.
-```
-
-**Key corrections:**
-
-| | Before (broken) | After (correct) |
-|---|---|---|
-| Host | `api.cloudflare.com/client/v4` | `rtc.live.cloudflare.com/v1` |
-| Path | `/accounts/{id}/rtc/config` | `/turn/keys/{KEY_ID}/credentials/generate-ice-servers` |
-| Body | _(none)_ | `{ "ttl": 86400 }` |
-| Response | expected `{ success, result }` wrapper | bare `{ iceServers: [...] }`, status 201 |
-| Token ID role | used as account ID | used as TURN **key** ID (in URL path) |
-
-**Also cleaned up:**
-- Removed all temporary `[DEBUG]` logging from `route.ts`, `lib/webrtc.ts`, `lib/api.ts`, and `app/page.tsx` (added while diagnosing the "stuck at connecting" and TURN 500 bugs)
-- Removed the unused `CLOUDFLARE_TURN_APP_ID` env var and dead code
-- Renamed `accountId` → `turnKeyId` for clarity
-- Kept legitimate `console.warn` fallback messages in `buildICEConfig` (they signal when TURN is unavailable)
-
-**How We Found It:** Production Vercel function logs showed the exact Cloudflare error response (7003/7000). Confirmed the correct API contract via Cloudflare's official documentation.
-
-**Verification:**
-- ✅ `npm run build` succeeds
-- ✅ 20 automated tests pass (route tests updated to mock the correct `{ iceServers: [...] }` shape; brittle exact-string log assertions relaxed to `stringContaining`)
-- ✅ No `[DEBUG]` logging remains in source
+| **Type** | Missing capability (NAT traversal) + wrong external API contract |
+| **Files** | 3 (1 new API route, 2 modified core files) |
+| **Tests** | 20 automated tests (build clean, no `[DEBUG]` logging in source) |
+| **Deployment** | Requires `CLOUDFLARE_TURN_TOKEN_ID` + `CLOUDFLARE_TURN_API_TOKEN` in Vercel env vars |
 
 ---
 
 ## Phase 1 Complete
 
-**All 8 bugs fixed:**
+**All 7 bugs fixed:**
 - ✅ Bug #1: Heartbeat updates all presence (fixed — scope to caller)
 - ✅ Bug #2: Busy flag not cleared on `end` (fixed — added end handler)
 - ✅ Bug #3: Signal orphan cleanup logging (fixed — added observability)
 - ✅ Bug #4: ICE candidate ordering (fixed — set remote description first)
 - ✅ Bug #5: Data channel race condition (fixed — check readyState)
 - ✅ Bug #6: Chat message type mismatch (fixed — use "msg" consistently)
-- ✅ Bug #7: Cross-network connectivity (fixed — add Cloudflare TURN)
-- ✅ Bug #8: Wrong Cloudflare TURN endpoint (fixed — use correct Realtime API)
+- ✅ Bug #7: Cross-network connectivity (fixed — add Cloudflare TURN relay via the correct Realtime API)
 
 **Phase 1 deliverable:** Fully functional P2P geolocation chat/video app with cross-network connectivity and comprehensive test coverage.
 
