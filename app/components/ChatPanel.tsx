@@ -174,9 +174,9 @@ export default function ChatPanel({
           title="Send"
           className="flex h-11 w-11 items-center justify-center rounded-full bg-signal text-ink-950 shadow-glow-sm transition duration-300 ease-[var(--ease-spring)] hover:scale-105 hover:shadow-glow active:scale-90 disabled:scale-100 disabled:opacity-35 disabled:shadow-none"
         >
-          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+          <svg className="h-4 w-4 rotate-45" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path
-              d="M4 12l15-7-5 7 5 7-15-7zM9 12h5"
+              d="M22 2 11 13M22 2l-7 20-4-9-9-4 20-7Z"
               stroke="currentColor"
               strokeWidth="1.7"
               strokeLinejoin="round"
