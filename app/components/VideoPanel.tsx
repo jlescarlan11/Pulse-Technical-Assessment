@@ -27,6 +27,15 @@ const COPY = {
   localPausedTitle: "Paused",
   localPausedSub: "Held while they’re away · camera resumes when they’re back",
 
+  // BUG-2 — local PiP, the very start of a call. peerAway initialises true
+  // (fail-closed) for ~1 RTT before the first presence heartbeat, so the
+  // outgoing track is held even though the stranger never actually stepped
+  // away. Until the stranger has been seen present once (peerHasBeenPresent),
+  // we must NOT attribute the hold to them. Show a neutral, honest connecting
+  // treatment instead — tab/presence language only, no "they're away".
+  localConnectingTitle: "Securing video…",
+  localConnectingSub: "Your camera turns on once both tabs are connected",
+
   // M5 — top HUD pill. Reads "Live" when both present; when the stranger
   // has stepped away it drops the pulse and reads a calm "Away" so the HUD
   // agrees with the full-screen "Stranger stepped away" overlay.
@@ -83,9 +92,12 @@ export default function VideoPanel({
   // between "Waiting…" and the first live frame. This latch flips true the
   // first time peerAway is observed false (i.e. the stranger was actually
   // present). The mid-call stepped-away overlay is gated on it, so a new call
-  // shows waiting -> live, never waiting -> stepped-away -> live. The latch
-  // lives in component state and resets naturally on unmount, and page.tsx
-  // keys this panel to the active video session, so each call starts fresh.
+  // shows waiting -> live, never waiting -> stepped-away -> live.
+  //
+  // BUG-1: freshness per call is NOT provided by a key in page.tsx (there is
+  // none). page.tsx renders VideoPanel only while video === "active", so the
+  // component unmounts when the call ends and remounts on the next call — and
+  // this latch, living in component state, resets naturally on that unmount.
   const [peerHasBeenPresent, setPeerHasBeenPresent] = useState(false);
   if (!peerAway && !peerHasBeenPresent) setPeerHasBeenPresent(true);
 
@@ -97,9 +109,16 @@ export default function VideoPanel({
   const [seenLocalAway, setSeenLocalAway] = useState(localAway);
   if (peerAway !== seenPeerAway) {
     setSeenPeerAway(peerAway);
-    // Only narrate the stranger's return once a call truly existed.
-    if (peerAway) setAnnouncement(COPY.announcePeerAway);
-    else if (hasConnected) setAnnouncement(COPY.announcePeerBack);
+    // BUG-5: only narrate the stranger stepping away under the SAME condition
+    // that shows the visual overlay (hasConnected && peerHasBeenPresent), so a
+    // screen reader can never say "Stranger stepped away" while the screen
+    // still reads "Waiting…" / "Live" pre-heartbeat. The peer's RETURN stays
+    // gated on hasConnected as before.
+    if (peerAway) {
+      if (hasConnected && peerHasBeenPresent) setAnnouncement(COPY.announcePeerAway);
+    } else if (hasConnected) {
+      setAnnouncement(COPY.announcePeerBack);
+    }
   }
   if (localAway !== seenLocalAway) {
     setSeenLocalAway(localAway);
@@ -134,6 +153,13 @@ export default function VideoPanel({
   // initial peerAway=true never flashes the overlay before the first frame.
   const showPeerAwayOverlay = hasConnected && peerAway && peerHasBeenPresent;
   const localPaused = localAway || peerAway; // outgoing track disabled here
+
+  // BUG-2: the PiP must only blame the stranger ("Held while they’re away")
+  // once they have actually been seen present — the same peerHasBeenPresent
+  // latch the full-screen overlay uses. Before the first heartbeat peerAway is
+  // still its fail-closed `true`, so we attribute the hold to nothing and fall
+  // through to the neutral "Securing video…" connecting treatment instead.
+  const localPausedByPeer = !localAway && peerAway && peerHasBeenPresent;
 
   // m1 (no escape hatch): a full-screen stepped-away overlay could otherwise
   // sit on top of an auto-calmed control bar, hiding the End button. Whenever
@@ -305,7 +331,7 @@ export default function VideoPanel({
                       {COPY.localAwaySub}
                     </p>
                   </>
-                ) : (
+                ) : localPausedByPeer ? (
                   <>
                     {/* You're present but the stranger left — quieter hold; the
                         sub-line attributes the cause to the stranger, tying this
@@ -318,6 +344,23 @@ export default function VideoPanel({
                     </p>
                     <p className="text-[10px] leading-tight text-haze-400">
                       {COPY.localPausedSub}
+                    </p>
+                  </>
+                ) : (
+                  <>
+                    {/* BUG-2 — pre-first-heartbeat: peerAway is still fail-closed
+                        true but the stranger has never been seen present, so we
+                        do NOT blame them. Neutral connecting treatment: a calm
+                        progress glyph + honest tab/presence copy. */}
+                    <svg className="h-5 w-5 text-haze-300" viewBox="0 0 24 24" fill="none" aria-hidden>
+                      <circle cx="12" cy="12" r="8" stroke="currentColor" strokeWidth="1.6" opacity="0.35" />
+                      <path d="M12 4a8 8 0 0 1 8 8" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                    </svg>
+                    <p className="text-[11px] font-semibold leading-tight text-haze-100">
+                      {COPY.localConnectingTitle}
+                    </p>
+                    <p className="text-[10px] leading-tight text-haze-400">
+                      {COPY.localConnectingSub}
                     </p>
                   </>
                 )}

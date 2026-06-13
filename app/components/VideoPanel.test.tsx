@@ -90,6 +90,9 @@ describe("VideoPanel away matrix", () => {
       screen.getByText("Held while they’re away · camera resumes when they’re back"),
     ).toBeInTheDocument();
     expect(screen.queryByText("You stepped away")).not.toBeInTheDocument();
+    // BUG-2: this only-peer-away "Paused" attribution must be the genuine
+    // mid-call one, never the pre-heartbeat connecting copy.
+    expect(screen.queryByText("Securing video…")).not.toBeInTheDocument();
     // M5: the HUD pill agrees with the overlay — calm "Away", no "Live".
     expect(screen.getByText("Away")).toBeInTheDocument();
     expect(screen.queryByText("Live")).not.toBeInTheDocument();
@@ -142,6 +145,40 @@ describe("VideoPanel M3 — no call-start flicker", () => {
   });
 });
 
+describe("VideoPanel BUG-2 — startup PiP attribution", () => {
+  it("pre-first-heartbeat (peerAway fail-closed true, never present): PiP shows neutral connecting copy, NOT 'Held while they’re away'", () => {
+    // Fresh call: stream is connected but peerAway is still its initial
+    // fail-closed `true` and the stranger has NEVER been seen present, so the
+    // outgoing track is held even though the stranger didn't actually step away.
+    // The PiP must not blame them — it shows the neutral "Securing video…"
+    // connecting treatment instead of the only-peer-away "Paused" copy.
+    renderPanel({ peerAway: true, localAway: false });
+
+    expect(screen.getByText("Securing video…")).toBeInTheDocument();
+    expect(
+      screen.getByText("Your camera turns on once both tabs are connected"),
+    ).toBeInTheDocument();
+    // No stranger-attributed copy before the first heartbeat.
+    expect(screen.queryByText("Paused")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Held while they’re away · camera resumes when they’re back"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Stranger stepped away")).not.toBeInTheDocument();
+  });
+
+  it("once the stranger has been present, a later step-away switches the PiP to the stranger-attributed 'Paused' copy", () => {
+    // present -> away: now the hold is genuinely the stranger's doing, so the
+    // PiP is allowed to attribute it to them and the connecting copy is gone.
+    renderPeerSteppedAway({ localAway: false });
+
+    expect(screen.getByText("Paused")).toBeInTheDocument();
+    expect(
+      screen.getByText("Held while they’re away · camera resumes when they’re back"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Securing video…")).not.toBeInTheDocument();
+  });
+});
+
 describe("VideoPanel pre-call waiting state", () => {
   it("shows the waiting copy before any remote stream arrives", () => {
     renderPanel({ remoteStream: null, peerAway: true, localAway: false });
@@ -164,6 +201,9 @@ describe("VideoPanel aria-live presence announcements", () => {
   });
 
   it("announces 'Stranger stepped away' when the peer leaves mid-call", () => {
+    // Start with the stranger present (so peerHasBeenPresent latches true and a
+    // connection exists), then have them step away — matching the visual overlay
+    // condition the BUG-5 fix gates the announcement on.
     const { rerender } = renderPanel({ peerAway: false, localAway: false });
     rerender(
       <VideoPanel
@@ -175,6 +215,15 @@ describe("VideoPanel aria-live presence announcements", () => {
       />,
     );
     expect(within(liveRegion()).getByText("Stranger stepped away")).toBeInTheDocument();
+  });
+
+  it("BUG-5: does NOT announce 'Stranger stepped away' at startup before the peer has ever been present", () => {
+    // peerAway initialises true (fail-closed) on a fresh call. Because the
+    // visual overlay is gated on hasConnected && peerHasBeenPresent, the
+    // announcement must be too — otherwise a screen reader would say "Stranger
+    // stepped away" while the screen reads "Live". The announcer stays empty.
+    renderPanel({ peerAway: true, localAway: false });
+    expect(within(liveRegion()).queryByText("Stranger stepped away")).not.toBeInTheDocument();
   });
 
   it("announces 'Stranger is back' when a connected peer returns", () => {

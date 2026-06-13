@@ -552,6 +552,9 @@ export default function Home() {
 
     document.addEventListener("visibilitychange", onVisibility);
     window.addEventListener("pagehide", onPageHide);
+    // beforeunload too, so a hard close/navigation cuts instantly rather than
+    // waiting out the ~HEARTBEAT_TIMEOUT_MS staleness window on the peer.
+    window.addEventListener("beforeunload", onPageHide);
 
     // Announce presence immediately so the peer clears its fail-closed default
     // within ~1 RTT instead of waiting a full heartbeat interval — otherwise the
@@ -582,6 +585,7 @@ export default function Home() {
     return () => {
       document.removeEventListener("visibilitychange", onVisibility);
       window.removeEventListener("pagehide", onPageHide);
+      window.removeEventListener("beforeunload", onPageHide);
       clearInterval(heartbeat);
       if (awayTimer) clearTimeout(awayTimer);
     };
