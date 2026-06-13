@@ -17,6 +17,7 @@ export default function EntryGate({
       return;
     }
     setStatus("locating");
+    setError("");
     navigator.geolocation.getCurrentPosition(
       (pos) => onReady(pos.coords.latitude, pos.coords.longitude),
       (err) => {
@@ -33,31 +34,165 @@ export default function EntryGate({
     );
   }
 
+  const locating = status === "locating";
+
   return (
-    <div className="flex min-h-full flex-1 flex-col items-center justify-center gap-8 bg-zinc-950 p-6 text-zinc-100">
-      <div className="text-center">
-        <h1 className="text-4xl font-bold tracking-tight">Pulse</h1>
-        <p className="mt-2 max-w-sm text-zinc-400">
-          A living globe of anonymous strangers. Drop onto the map and connect.
-        </p>
+    <div className="relative flex min-h-full flex-1 flex-col items-center justify-center overflow-hidden bg-ink-950 px-6">
+      {/* ---- Living atmosphere ---- */}
+      <div className="aurora-field" />
+      <div className="signal-grain" />
+
+      {/* ---- Radar beacon: a halo that pulses outward from the heart ----
+          Soft, glowing rings (blurred so they read as waves of light, not
+          crisp lines) emanate on a steady rhythm. A faint mask keeps the very
+          centre — under the wordmark — clean. */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-0"
+        style={{
+          maskImage:
+            "radial-gradient(circle at 50% 50%, transparent 90px, #000 320px)",
+          WebkitMaskImage:
+            "radial-gradient(circle at 50% 50%, transparent 90px, #000 320px)",
+        }}
+      >
+        {/* static hairline rings — faint radar structure */}
+        {[360, 620, 900].map((d) => (
+          <span
+            key={d}
+            className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border"
+            style={{
+              width: d,
+              height: d,
+              borderColor:
+                "color-mix(in oklch, var(--color-signal) 9%, transparent)",
+            }}
+          />
+        ))}
+        {/* pulsing halo rings — soft waves of light radiating outward */}
+        {[0, 1.5, 3, 4.5].map((delay) => (
+          <span
+            key={delay}
+            className="absolute left-1/2 top-1/2 h-56 w-56 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/80 blur-[1.5px]"
+            style={{
+              animation: "beacon 6s var(--ease-calm) infinite",
+              animationDelay: `${delay}s`,
+            }}
+          />
+        ))}
       </div>
 
-      <button
-        onClick={enter}
-        disabled={status === "locating"}
-        className="rounded-full bg-emerald-400 px-8 py-3 font-semibold text-zinc-950 transition hover:bg-emerald-300 disabled:opacity-60"
-      >
-        {status === "locating" ? "Locating…" : "Enter Pulse"}
-      </button>
+      {/* Soft glow that breathes behind the wordmark — the pulse's heart */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute left-1/2 top-1/2 h-72 w-72 -translate-x-1/2 -translate-y-1/2 rounded-full"
+        style={{
+          background:
+            "radial-gradient(circle, color-mix(in oklch, var(--color-signal) 22%, transparent), transparent 68%)",
+          animation: "pulse-glow 4s var(--ease-calm) infinite",
+        }}
+      />
 
-      {status === "error" && (
-        <p className="max-w-sm text-center text-sm text-red-400">{error}</p>
-      )}
+      <div className="vignette" />
 
-      <p className="max-w-sm text-center text-xs text-zinc-500">
-        No sign-up. Your dot is placed 1–3&nbsp;km from your real location.
-        Nothing is stored — closing the tab ends everything.
-      </p>
+      {/* ---- Content ---- */}
+      <div className="animate-fade-up relative z-10 flex w-full max-w-md flex-col items-center text-center">
+        {/* Eyebrow */}
+        <span className="mb-7 inline-flex items-center gap-2 rounded-full border border-haze-200/10 bg-ink-850/60 px-3.5 py-1.5 font-mono text-[11px] uppercase tracking-[0.18em] text-haze-300 backdrop-blur">
+          <span className="relative flex h-1.5 w-1.5">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-75" />
+            <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-signal" />
+          </span>
+          Live · anonymous · peer-to-peer
+        </span>
+
+        {/* Wordmark */}
+        <h1 className="text-glow text-7xl font-semibold tracking-tight text-haze-50 sm:text-8xl">
+          Pulse
+        </h1>
+
+        <p className="mt-5 max-w-xs text-balance text-base leading-relaxed text-haze-300">
+          A living globe of strangers, broadcasting from the dark. Find a
+          signal. Say hello.
+        </p>
+
+        {/* CTA */}
+        <button
+          onClick={enter}
+          disabled={locating}
+          className="group relative mt-10 inline-flex items-center gap-3 overflow-hidden rounded-full bg-signal px-9 py-4 text-base font-semibold text-ink-950 shadow-glow transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:shadow-glow-lg active:scale-95 disabled:cursor-default disabled:hover:scale-100"
+        >
+          {/* shimmer sweep */}
+          <span
+            aria-hidden
+            className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-white/40 to-transparent transition-transform duration-700 group-hover:translate-x-full"
+          />
+          {locating ? (
+            <>
+              <Radar />
+              <span className="relative">Finding your signal…</span>
+            </>
+          ) : (
+            <>
+              <span className="relative">Enter Pulse</span>
+              <svg
+                className="relative h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5"
+                viewBox="0 0 16 16"
+                fill="none"
+                aria-hidden
+              >
+                <path
+                  d="M2 8h11M9 4l4 4-4 4"
+                  stroke="currentColor"
+                  strokeWidth="1.8"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                />
+              </svg>
+            </>
+          )}
+        </button>
+
+        {/* Error */}
+        {status === "error" && (
+          <div className="animate-fade-up mt-6 flex max-w-sm items-start gap-2.5 rounded-2xl border border-danger/25 bg-danger/10 px-4 py-3 text-left text-sm text-danger-400">
+            <svg
+              className="mt-0.5 h-4 w-4 shrink-0"
+              viewBox="0 0 16 16"
+              fill="none"
+              aria-hidden
+            >
+              <circle cx="8" cy="8" r="6.5" stroke="currentColor" strokeWidth="1.4" />
+              <path
+                d="M8 5v3.5M8 11h.01"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+            <span>{error}</span>
+          </div>
+        )}
+
+        {/* Privacy footnote */}
+        <p className="mt-10 max-w-xs font-mono text-[11px] leading-relaxed tracking-wide text-haze-500">
+          No sign-up. Your dot lands 1–3&nbsp;km from your real location.
+          Nothing is stored — closing the tab ends everything.
+        </p>
+      </div>
     </div>
+  );
+}
+
+/* Small radar sweep used inside the CTA while locating */
+function Radar() {
+  return (
+    <span className="relative inline-flex h-4 w-4 items-center justify-center">
+      <span className="absolute h-4 w-4 rounded-full border border-ink-950/40" />
+      <span
+        className="absolute h-4 w-4 rounded-full border-2 border-transparent border-t-ink-950"
+        style={{ animation: "spin 0.9s linear infinite" }}
+      />
+    </span>
   );
 }

@@ -323,6 +323,7 @@ export default function Home() {
   }
 
   const inChat = conn.kind === "connecting" || conn.kind === "connected";
+  const activePeerId = conn.kind !== "idle" ? conn.peerId : undefined;
 
   return (
     <main className="fixed inset-0 overflow-hidden">
@@ -334,17 +335,27 @@ export default function Home() {
       />
 
       {notice && (
-        <div className="absolute left-1/2 top-20 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
+        <div
+          role="status"
+          className="animate-pill-in glass-faint absolute left-1/2 top-6 z-30 -translate-x-1/2 rounded-full px-4 py-2.5 text-sm text-haze-100"
+        >
           {notice}
         </div>
       )}
 
       {conn.kind === "requesting" && (
-        <div className="absolute left-1/2 top-20 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
-          <span>Requesting connection…</span>
+        <div
+          role="status"
+          className="animate-pill-in glass absolute left-1/2 top-6 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm text-haze-100"
+        >
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-signal" />
+          </span>
+          <span>Sending signal…</span>
           <button
             onClick={cancelRequest}
-            className="rounded-full bg-zinc-700 px-3 py-1 text-xs hover:bg-zinc-600"
+            className="rounded-full bg-ink-700/70 px-3 py-1 text-xs font-medium text-haze-200 transition hover:bg-ink-600 active:scale-95"
           >
             Cancel
           </button>
@@ -353,11 +364,14 @@ export default function Home() {
 
       {conn.kind === "incoming" && (
         <ConnectionPrompt
-          title="A stranger wants to connect"
-          acceptLabel="Accept"
-          declineLabel="Decline"
+          title="A stranger is reaching out"
+          subtitle="Someone nearby wants to connect with you."
+          acceptLabel="Connect"
+          declineLabel="Ignore"
           onAccept={acceptIncoming}
           onDecline={declineIncoming}
+          peerId={conn.peerId}
+          variant="connect"
         />
       )}
 
@@ -372,11 +386,19 @@ export default function Home() {
           }}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
+          peerId={activePeerId}
         />
       )}
 
       {video === "requesting" && (
-        <div className="absolute bottom-24 left-1/2 z-30 -translate-x-1/2 rounded-full bg-zinc-800/90 px-4 py-2 text-sm text-zinc-100 shadow-lg backdrop-blur">
+        <div
+          role="status"
+          className="animate-pill-in glass-faint absolute bottom-24 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2.5 rounded-full px-4 py-2.5 text-sm text-haze-100"
+        >
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-signal" />
+          </span>
           Waiting for stranger to accept video…
         </div>
       )}
@@ -384,11 +406,13 @@ export default function Home() {
       {video === "incoming" && (
         <ConnectionPrompt
           title="Start video call?"
-          subtitle="The stranger wants to turn on video."
+          subtitle="The stranger wants to turn on their camera."
           acceptLabel="Accept"
           declineLabel="Decline"
           onAccept={acceptVideo}
           onDecline={declineVideo}
+          peerId={activePeerId}
+          variant="video"
         />
       )}
 
