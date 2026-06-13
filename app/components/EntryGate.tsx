@@ -42,13 +42,21 @@ export default function EntryGate({
       <div className="aurora-field" />
       <div className="signal-grain" />
 
-      {/* ---- Radar beacon: concentric rings + expanding pings ---- */}
+      {/* ---- Radar beacon: concentric rings + expanding pings ----
+          A radial mask dissolves the rings toward the centre so they read as
+          outer atmosphere instead of hard lines bisecting the wordmark/CTA. */}
       <div
         aria-hidden
-        className="pointer-events-none absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2"
+        className="pointer-events-none absolute inset-0"
+        style={{
+          maskImage:
+            "radial-gradient(circle at 50% 50%, transparent 280px, #000 600px)",
+          WebkitMaskImage:
+            "radial-gradient(circle at 50% 50%, transparent 280px, #000 600px)",
+        }}
       >
         {/* static hairline rings */}
-        {[260, 440, 640, 880].map((d) => (
+        {[320, 560, 820, 1100].map((d) => (
           <span
             key={d}
             className="absolute left-1/2 top-1/2 -translate-x-1/2 -translate-y-1/2 rounded-full border"
@@ -56,17 +64,17 @@ export default function EntryGate({
               width: d,
               height: d,
               borderColor:
-                "color-mix(in oklch, var(--color-signal) 12%, transparent)",
+                "color-mix(in oklch, var(--color-signal) 9%, transparent)",
             }}
           />
         ))}
-        {/* expanding signal pings */}
-        {[0, 1.6, 3.2].map((delay) => (
+        {/* expanding signal pings — soft pulses of light, not crisp lines */}
+        {[0, 2.8].map((delay) => (
           <span
             key={delay}
-            className="absolute left-1/2 top-1/2 h-64 w-64 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/40"
+            className="absolute left-1/2 top-1/2 h-80 w-80 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-signal/35 blur-[2px]"
             style={{
-              animation: "beacon 4.8s var(--ease-calm) infinite",
+              animation: "beacon 6.4s var(--ease-calm) infinite",
               animationDelay: `${delay}s`,
             }}
           />
