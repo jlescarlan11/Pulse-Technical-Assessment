@@ -39,6 +39,10 @@ export default function Home() {
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [notice, setNotice] = useState<string | null>(null);
+  // Terminal (unrecoverable) notice — distinct from the transient confirmation
+  // toast: it persists until the user acts (Reload) rather than auto-dismissing.
+  // Kept separate so showNotice()'s 3.5s path stays untouched.
+  const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
@@ -84,6 +88,11 @@ export default function Home() {
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Auto-dismiss timer for an INCOMING prompt the receiver never answers. The
+  // requester gives up after REQUEST_TIMEOUT_MS and tears down its peer; without
+  // this, a late Connect click would accept into a stale/torn-down peer and hang
+  // on a silent "Connecting…". Mirrors requestTimer's cleanup style.
+  const incomingTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Last known location, kept in a ref so a token-refresh re-join (triggered by
   // a 401) can re-register presence with the same coordinates.
   const locationRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -175,6 +184,7 @@ export default function Home() {
 
   function teardown(message?: string) {
     if (requestTimer.current) clearTimeout(requestTimer.current);
+    if (incomingTimer.current) clearTimeout(incomingTimer.current);
     peerRef.current?.close();
     peerRef.current = null;
     setLocalStream(null);
@@ -293,6 +303,7 @@ export default function Home() {
 
   function acceptIncoming() {
     if (connRef.current.kind !== "incoming") return;
+    if (incomingTimer.current) clearTimeout(incomingTimer.current);
     const peerId = connRef.current.peerId;
     void startPeer(peerId, false);
     void emitSignal(peerId, "accept");
@@ -301,6 +312,7 @@ export default function Home() {
 
   function declineIncoming() {
     if (connRef.current.kind !== "incoming") return;
+    if (incomingTimer.current) clearTimeout(incomingTimer.current);
     void emitSignal(connRef.current.peerId, "decline");
     setConn({ kind: "idle" });
   }
@@ -412,6 +424,31 @@ export default function Home() {
     processSignalRef.current = processSignal;
   });
 
+  // C3 — incoming-prompt expiry. While a prompt is showing, give the receiver
+  // the same budget the requester uses before it bails (REQUEST_TIMEOUT_MS).
+  // Fire slightly early so a late Connect can't race the requester's teardown
+  // into a dead peer. The effect's cleanup covers accept / decline / replaced-by
+  // -new-request / "end"-signal dismissal — every path that leaves "incoming".
+  useEffect(() => {
+    if (conn.kind !== "incoming") return;
+    const peerId = conn.peerId;
+    incomingTimer.current = setTimeout(() => {
+      if (
+        connRef.current.kind === "incoming" &&
+        connRef.current.peerId === peerId
+      ) {
+        setConn({ kind: "idle" });
+        showNotice("That request expired.");
+      }
+    }, REQUEST_TIMEOUT_MS - 2_000);
+    return () => {
+      if (incomingTimer.current) {
+        clearTimeout(incomingTimer.current);
+        incomingTimer.current = null;
+      }
+    };
+  }, [conn]);
+
   // applyVideoGate is recreated each render; read it through a ref inside the
   // heartbeat interval and the data-channel control handler so effect deps stay
   // honest and the interval isn't torn down on every render.
@@ -448,8 +485,13 @@ export default function Home() {
     const onAuthFailure = async () => {
       authFailures += 1;
       if (authFailures >= MAX_AUTH_FAILURES) {
-        // Stop the loop — no reschedule.
-        setNotice("Session expired. Reload the page to reconnect.");
+        // Stop the loop — no reschedule. Surface a TERMINAL notice (persistent,
+        // danger-tinted, with a Reload action) rather than a transient toast.
+        // FIX: the terminal notice takes precedence over any transient toast that
+        // may be mid-flight (both share the top-6 z-50 slot). Clear the transient
+        // notice so the two can never overlap at the same coordinate.
+        setNotice(null);
+        setTerminalNotice("Session expired. Reload the page to reconnect.");
         return;
       }
       await refreshTokenRef.current();
@@ -616,10 +658,55 @@ export default function Home() {
         canConnect={conn.kind === "idle"}
       />
 
-      {notice && (
+      {/* Z-TIER (M6): status messaging always sits ABOVE modals/panels.
+          ConnectionPrompt + VideoPanel occupy z-40; every transient toast and
+          the terminal notice ride z-50 so they can never be occluded. Distinct
+          top slots keep two simultaneously-possible toasts from stacking on the
+          exact same coordinate: transient confirmations + the terminal notice
+          own top-6; the "requesting" pill drops to top-20 so a leftover
+          confirmation toast and an active request never collide. */}
+
+      {/* Terminal / unrecoverable notice (M8). Persistent — no auto-dismiss —
+          with a danger-tinted glass, a warning glyph, and a real focusable
+          Reload control. role="alert" so it's announced assertively. Rendered
+          first within the z-50 tier and on its own top-6 slot. */}
+      {terminalNotice && (
+        <div
+          role="alert"
+          className="animate-pill-in absolute left-1/2 top-6 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-2xl border border-danger/40 bg-danger/15 px-4 py-3 text-sm text-haze-50 shadow-[0_0_28px_-6px_var(--color-danger)] backdrop-blur-xl"
+        >
+          <svg
+            viewBox="0 0 24 24"
+            aria-hidden="true"
+            className="h-5 w-5 shrink-0 text-danger-400"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth={2}
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          >
+            <path d="M12 9v4" />
+            <path d="M12 17h.01" />
+            <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+          </svg>
+          <span className="leading-snug">{terminalNotice}</span>
+          <button
+            type="button"
+            onClick={() => location.reload()}
+            className="ml-1 shrink-0 rounded-full bg-danger px-3.5 py-1.5 text-xs font-semibold text-ink-950 transition hover:bg-danger-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-danger-400 focus-visible:ring-offset-2 focus-visible:ring-offset-ink-950 active:scale-95"
+          >
+            Reload
+          </button>
+        </div>
+      )}
+
+      {/* Transient confirmation toast. Suppressed while a terminalNotice is up:
+          both ride z-50 on the same top-6 slot, so the persistent terminal
+          notice takes precedence and the transient one never overlaps it. */}
+      {notice && !terminalNotice && (
         <div
           role="status"
-          className="animate-pill-in glass-faint absolute left-1/2 top-6 z-30 -translate-x-1/2 rounded-full px-4 py-2.5 text-sm text-haze-100"
+          className="animate-pill-in glass-faint absolute left-1/2 top-6 z-50 -translate-x-1/2 rounded-full px-4 py-2.5 text-sm text-haze-100"
         >
           {notice}
         </div>
@@ -628,7 +715,7 @@ export default function Home() {
       {conn.kind === "requesting" && (
         <div
           role="status"
-          className="animate-pill-in glass absolute left-1/2 top-6 z-30 flex -translate-x-1/2 items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm text-haze-100"
+          className="animate-pill-in glass absolute left-1/2 top-20 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm text-haze-100"
         >
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
@@ -675,7 +762,7 @@ export default function Home() {
       {video === "requesting" && (
         <div
           role="status"
-          className="animate-pill-in glass-faint absolute bottom-24 left-1/2 z-30 flex -translate-x-1/2 items-center gap-2.5 rounded-full px-4 py-2.5 text-sm text-haze-100"
+          className="animate-pill-in glass-faint absolute bottom-24 left-1/2 z-50 flex -translate-x-1/2 items-center gap-2.5 rounded-full px-4 py-2.5 text-sm text-haze-100"
         >
           <span className="relative flex h-2 w-2">
             <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
