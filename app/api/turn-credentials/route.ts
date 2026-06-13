@@ -41,9 +41,9 @@ export async function GET(): Promise<Response> {
   }
 
   try {
-    // Cloudflare TURN credentials endpoint using TURN Token ID
-    // Format: https://rtc.live.cloudflare.com/api/v1/turn/keys/{tokenId}/credentials/rtc
-    const url = `https://rtc.live.cloudflare.com/api/v1/turn/keys/${accountId}/credentials/rtc`;
+    // Cloudflare TURN credentials endpoint (accounts API)
+    // Format: https://api.cloudflare.com/client/v4/accounts/{accountId}/rtc/config
+    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/rtc/config`;
     console.log("[DEBUG] Calling Cloudflare TURN API URL:", url);
 
     const response = await fetch(url, {
