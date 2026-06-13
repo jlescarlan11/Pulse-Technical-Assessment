@@ -85,8 +85,6 @@ export async function GET(): Promise<Response> {
       },
     });
   } catch (error) {
-    const errorMessage =
-      error instanceof Error ? error.message : "Unknown error";
     return Response.json(
       { error: "Failed to fetch TURN credentials" },
       { status: 500 }
