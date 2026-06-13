@@ -906,3 +906,126 @@ Phase 2 merged to `main` while this branch was in flight, and it had also touche
 - **TURN credential re-fetch (ICE restart)** for calls that outlive the 600s TTL — there is already a `TODO` for this in `lib/webrtc.ts`.
 
 **Phase 3 deliverable:** A coordination API that can be shown to strangers — every session-altering call proves it owns the session via an anonymous capability token, billed and abuse-prone routes are gated and rate-limited, the app ships clickjacking/XSS headers around its camera and mic, and a CI merge gate stands behind it all — with no regression to the Phase 1 functionality or Phase 2 polish.
+
+---
+---
+
+# Phase 4: Make It Yours — The Safety Phrase (SAS Verification)
+
+**Status:** Complete
+**Branch:** `feature/phase-4-sas`
+**Scope:** A new, self-contained verification surface layered over the existing P2P call. No new DB tables, no new API routes, no change to the signaling or connection state machine — it reads fingerprints out of SDP the peers already exchange.
+
+The brief for this phase was open-ended: *build something NEW that makes Pulse feel more alive and/or safe, a unique feature of our own design — surprise us, ship it working, and explain the thinking.* This section is mostly the thinking.
+
+---
+
+## What It Is
+
+When a P2P call connects, both peers now independently derive a five-token **safety phrase** — five `{word + emoji}` tokens like `🍎 apple · ⚓ anchor · 🐻 bear · 🌵 cactus · 🔔 bell` — and show it in the chat header and over the video. If both screens show the *same* phrase, the encrypted channel is verified end-to-end and no one is sitting in the middle of the call. It's a **Short Authentication String (SAS)**, the same idea behind Signal's safety numbers and ZRTP's spoken words, adapted for an anonymous stranger-chat app where there are no accounts and no prior trust.
+
+The phrase is something two strangers can read to each other out loud (they're already on a video call) or eyeball side-by-side. It is **advisory** — it never blocks chat or video.
+
+---
+
+## The Thinking — Why This Feature
+
+This is the heart of the notes, so it gets the most room.
+
+**It's the natural next move in the Phase 3 arc.** Phase 3 secured the *server*: capability tokens so the relay can't be impersonated, rate limiting, CSP, headers. But it left the trust model honest about one thing — the signaling relay (`/api/signal`) is only *semi-trusted*. We trust it to route messages; we shouldn't have to trust it with the *contents* of a call.
+
+And here's the gap. WebRTC encrypts media and data with DTLS, so the relay never sees plaintext — good. But the way each peer proves *who it's encrypting to* is the **DTLS certificate fingerprint**, and that fingerprint travels inside the SDP (`a=fingerprint:sha-256 AB:CD:…`) — which is relayed **through our mailbox**. A malicious or compromised relay could swap a fingerprint in transit and run a textbook man-in-the-middle: terminate the DTLS on both sides, decrypt, re-encrypt, forward. Both peers would see a perfectly "encrypted" call. The padlock would be green. **Nothing in the app could tell them otherwise.**
+
+That is exactly the gap SAS closes. The phrase is derived from *both* fingerprints, so a swapped fingerprint produces a *different* phrase on each end — and the two humans notice. Phase 3 said *trust the server less*; Phase 4 says *you don't have to trust it at all for the confidentiality of a call* — and gives users the means to check.
+
+**It also makes the app feel safe in a way nobody expects from a casual anonymous app.** A throwaway stranger-chat that quietly hands you a real end-to-end verification mechanism is memorable. That's the "surprise us" half of the brief — the safe half — answered with something that has teeth rather than a cosmetic "secure" badge.
+
+---
+
+## How It Works
+
+**Derivation (`lib/sas.ts`, `lib/sas-wordlist.ts` — pure, no DOM, unit-tested).**
+The phrase is `deriveSAS(sorted([localFingerprint, remoteFingerprint]))`:
+
+1. Normalize each fingerprint out of the SDP (`parseFingerprint` → `"<algo> <hex>"`, lowercased, whitespace-stripped).
+2. **Sort the two fingerprints lexicographically**, join with a separator, prefix with a version string (`pulse-sas-v2`), and SHA-256 the result (Web Crypto `crypto.subtle`).
+3. Take the first **5 bytes**; each byte (0–255) indexes a **256-entry** `{word, emoji}` wordlist — one byte per token, no modulo bias.
+
+The sort is the whole trick: it makes the preimage **order-independent**, so peer A computing `(A,B)` and peer B computing `(B,A)` derive the *identical* phrase. Under a MITM, each peer is encrypted to the *attacker's* cert, not to each other — so the two preimages differ and the two phrases diverge.
+
+**The key insight that shapes the entire UX:** the app **cannot auto-detect a mismatch.** Under a real MITM, each peer's connection is correctly encrypted *to the attacker* — locally everything is valid; there is no error to catch. Only the two humans, comparing the phrases over a channel the attacker doesn't control (their own eyes/voices on the call), can tell. So **"mismatch" is necessarily a user-declared action**, and that's the only thing that fires the loud warning. The app's job is to make comparison easy and the warning honest — not to pretend it can verify on its own.
+
+**The surface.** A `getFingerprints()` accessor on `PeerSession` (`lib/webrtc.ts`) reads the fingerprints off the local/remote descriptions. `app/page.tsx` owns the lifecycle as the single source of truth and passes it down to a shared `app/components/SafetyPhrase.tsx` (the phrase tokens, the status glyphs, and the centralized copy), surfaced in the **ChatPanel header** and the **VideoPanel scrim** so the two views can never disagree. There are **no new DB tables and no new API routes** — the fingerprints come from SDP that Phase 1 already exchanged.
+
+**States** (`SasStatus`), all advisory:
+
+| State | Meaning |
+|-------|---------|
+| `pending` | Channel just opened; fingerprints not derived yet. |
+| `unverified` | Phrase is shown, awaiting the human's "do these match?" judgement. |
+| `verified` | The human confirmed both screens show the same phrase. |
+| `flagged` | The human declared a mismatch → loud, persistent warning. |
+| `unavailable` | **Terminal**: derivation failed (`deriveSAS` threw, or fingerprints never both arrived after retries). No phrase will ever appear. Calm but **explicitly non-positive** — it never reads as "secure". |
+
+The lifecycle (`deriveSafetyPhrase` in `app/page.tsx`) starts when the data channel opens, retries on a short delay while the fingerprints are still arriving, and falls to the terminal `unavailable` state rather than hanging on `pending` forever.
+
+---
+
+## Key Decisions & Trade-offs
+
+- **Advisory, not gating.** SAS never blocks chat or video — a stakeholder ruling. Gating a casual anonymous app would get dismissed reflexively (people would click through it), and a hard gate creates *false confidence* — it implies the app verified something it provably can't. Advisory keeps the claim honest: the app shows the phrase; the human owns the verdict.
+- **Entropy: 4 → 5 tokens.** Started at 4 tokens (32 bits). The security audit flagged that a *determined active* MITM can grind self-generated DTLS certificates against a 32-bit target (generate certs until the resulting phrase collides), so we bumped to **5 tokens (40 bits — 256× harder)**. Cost: one extra word to read aloud. A consciously accepted trade — documented, not hand-waved, and the reason the version prefix is `pulse-sas-v2`.
+- **One canonical English word+emoji list, no localization.** Locale-divergent lists would derive *different phrases on each peer* and break cross-peer matching entirely. The wordlist is read-aloud-tuned: no homophones, no near-duplicate spellings, visually distinct emoji (so glyphs don't read the same over a low-res video call). **Reordering the list is a protocol change** — a token's index *is* its byte value — so any edit must bump `SAS_VERSION`.
+- **State resets on teardown.** A `sasRunId` generation guard invalidates any in-flight derivation and clears the phrase/status on every teardown, so a verification result can **never leak onto the next peer**. Conversely, the DTLS fingerprint is **stable across video renegotiation** (adding/removing a camera reuses the same cert), so the phrase doesn't flicker or re-derive mid-call.
+- **Accessibility.** States are distinguished by **icon + text, never color alone** (distinct shield / check / warning-triangle / shield-with-slash glyphs); `aria-live` announcements; the emoji is decorative (`aria-hidden`) while the word carries meaning for screen readers; real keyboard-operable confirm/flag buttons.
+
+---
+
+## What SAS Does *Not* Protect (Being Honest)
+
+A reviewer should know the edges:
+
+- It detects a **compromised relay**, not a **compromised endpoint.** If the stranger's own device is malicious, the phrase matches — they're who they say they are; they're just hostile.
+- **"Verified" is a user-asserted claim.** If a human clicks "they match" without actually comparing, the app records `verified` and offers no protection. SAS makes honest comparison *possible and easy*; it can't force it.
+- It is **not durable across reload.** In an anonymous app there is no persistent peer identity to pin a fingerprint to, so we don't pretend to remember "this stranger was verified before."
+
+These aren't gaps to fix later — they're the honest boundary of what an out-of-band SAS *can* do in an account-less app, and naming them is part of not creating false confidence.
+
+---
+
+## What I'd Do Next (With More Time)
+
+Ranked by value, not effort:
+
+1. **A real tamper demo / E2E proof.** The cross-peer divergence is the whole pitch, but it's the one thing the unit tests *can't* show (they verify symmetry on one machine). I'd build a tiny harness — a relay shim that swaps a DTLS fingerprint mid-signal — and a two-browser Playwright test that asserts the two phrases actually diverge. That turns "trust me, a MITM would be caught" into a reproducible artifact a reviewer can run.
+2. **A first-run "why" explainer.** Right now a stranger is told *what* to do ("compare the phrase") more than *why* it protects them. A one-time, dismissible micro-explainer ("if your phrases match, not even Pulse can listen in") would make the safety value land for non-technical users — the audit's main human-factors note.
+3. **Power-user "details" affordance.** Reveal the raw `sha-256` hex fingerprints behind a tap, for users who want to verify at full strength rather than the 40-bit phrase. Cheap, and it signals seriousness.
+4. **Harden two residual edges QA flagged.** (a) A wall-clock watchdog on `deriveSAS` so a hung `crypto.subtle` can never leave the phrase in `pending` forever (today only the *not-yet-available* path is bounded). (b) De-dupe the `aria-live` announcement that fires twice when chat and video are both mounted.
+5. **Revisit entropy vs. usability with data.** 40 bits is a defensible read-aloud sweet spot, but I'd want to A/B the comparison success rate at 5 vs. 6 tokens, and explore an emoji-grid "tap the one that matches" comparison as an alternative to reading aloud.
+6. **Safe internationalization.** A single English list is correct today (divergent locale lists would break matching), but a negotiated, versioned shared wordlist would let non-English speakers verify in their own language without sacrificing cross-peer determinism.
+
+---
+
+## Process & Verification
+
+Built through the project's subagent pipeline: `project-manager` → `stakeholder` (scope/value gate, where the advisory-not-gating ruling came from) → `backend-engineer` + `frontend-engineer` → `ui-ux-critic` + `security-auditor` (the 4→5-token entropy bump came out of this audit) → fixes → `test-engineer` → `code-reviewer` (**APPROVED**) → `qa-engineer`.
+
+- **109 tests pass** (up from Phase 3's 77 — the new `lib/sas.test.ts` covers order-independence, version-prefixing, determinism, fingerprint parsing/normalization, and the unavailable path).
+- `tsc` clean, lint clean, production build clean.
+
+---
+
+## Phase 4 Change Summary
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `lib/sas.ts` (new) | `parseFingerprint` + `deriveSAS` — sorted, version-prefixed SHA-256 → 5 wordlist indices | Order-independent so both peers match; a swapped fingerprint diverges |
+| `lib/sas-wordlist.ts` (new) | 256-entry read-aloud-tuned `{word, emoji}` list | One byte = one token, no bias; the order is part of the protocol |
+| `lib/webrtc.ts` | `getFingerprints()` accessor on `PeerSession` | Read the cert identity from already-exchanged SDP; stable across renegotiation |
+| `app/components/SafetyPhrase.tsx` (new) | Shared phrase tokens, status glyphs, centralized copy | Chat header and video scrim can never drift in wording or state |
+| `app/page.tsx` | SAS lifecycle (states + retry + terminal `unavailable`), `sasRunId` teardown guard, confirm/flag handlers | Single source of truth; verification never leaks across peers |
+
+**Total:** 2 new `lib` modules + 1 new component, wired through `lib/webrtc.ts` and `app/page.tsx`. No schema change, no new API route. Tests 77 → 109.
+**Risk:** Low — purely additive and advisory; the connection path is untouched, so even total SAS failure degrades to a calm "unverified" notice and the call still works.
+
+**Phase 4 deliverable:** An end-to-end verification that closes the one trust gap Phase 3 left open — the relay can no longer silently MITM a "secure" call without the two humans noticing — delivered as an honest, advisory, accessible safety phrase, with no regression to anything before it.
