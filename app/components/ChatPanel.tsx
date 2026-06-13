@@ -2,6 +2,19 @@
 
 import { useEffect, useRef, useState } from "react";
 import { peerColor } from "@/lib/peerColor";
+import type { SasPhrase } from "@/lib/sas";
+import {
+  CheckIcon,
+  PhraseTokens,
+  SAS_COMPARE_PROMPT,
+  SAS_MISMATCH_WARNING,
+  SAS_UNAVAILABLE_MESSAGE,
+  SAS_WHY_COMPARE,
+  ShieldIcon,
+  ShieldOffIcon,
+  WarningIcon,
+  type SasStatus,
+} from "./SafetyPhrase";
 
 export interface ChatMessage {
   id: number;
@@ -17,6 +30,10 @@ export default function ChatPanel({
   onStartVideo,
   onEnd,
   peerId,
+  sasPhrase,
+  sasStatus,
+  onConfirmMatch,
+  onFlagMismatch,
 }: {
   messages: ChatMessage[];
   connected: boolean;
@@ -25,6 +42,10 @@ export default function ChatPanel({
   onStartVideo: () => void;
   onEnd: () => void;
   peerId?: string;
+  sasPhrase: SasPhrase | null;
+  sasStatus: SasStatus;
+  onConfirmMatch: () => void;
+  onFlagMismatch: () => void;
 }) {
   const [draft, setDraft] = useState("");
   const [slowConnect, setSlowConnect] = useState(false);
@@ -120,6 +141,14 @@ export default function ChatPanel({
         </div>
       </header>
 
+      {/* Safety phrase — advisory end-to-end verification (Story 2 + 4) */}
+      <SafetyPhraseRegion
+        phrase={sasPhrase}
+        status={sasStatus}
+        onConfirmMatch={onConfirmMatch}
+        onFlagMismatch={onFlagMismatch}
+      />
+
       {/* Messages */}
       <div ref={listRef} className="flex-1 space-y-2.5 overflow-y-auto px-4 py-5">
         {messages.length === 0 && (
@@ -186,5 +215,115 @@ export default function ChatPanel({
         </button>
       </form>
     </div>
+  );
+}
+
+// The chat-header safety-phrase surface. Five states, each distinguished by
+// ICON + TEXT (never colour alone). Verified/flagged/unavailable transitions
+// are announced to assistive tech via aria-live regions so a screen-reader user
+// hears the change without focus moving.
+function SafetyPhraseRegion({
+  phrase,
+  status,
+  onConfirmMatch,
+  onFlagMismatch,
+}: {
+  phrase: SasPhrase | null;
+  status: SasStatus;
+  onConfirmMatch: () => void;
+  onFlagMismatch: () => void;
+}) {
+  return (
+    <section
+      aria-label="Safety phrase verification"
+      className="hairline border-b bg-ink-900/30 px-4 py-3"
+    >
+      <p className="mb-2 flex items-center gap-1.5 font-mono text-[10px] uppercase tracking-[0.16em] text-haze-500">
+        <ShieldIcon className="h-3 w-3" />
+        Safety phrase
+      </p>
+
+      {status === "unavailable" ? (
+        // TERMINAL: derivation failed. Calm, non-positive — visually distinct
+        // from the "pending" spinner (no live dot, a struck-through shield) and
+        // never reads as a verified assurance.
+        <div className="flex items-start gap-2 text-xs leading-relaxed text-haze-400">
+          <ShieldOffIcon className="mt-0.5 h-4 w-4 shrink-0 text-haze-500" />
+          <p>{SAS_UNAVAILABLE_MESSAGE}</p>
+        </div>
+      ) : status === "pending" || !phrase ? (
+        <p className="flex items-center gap-2 text-xs text-haze-400">
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-60" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-signal/70" />
+          </span>
+          Establishing secure phrase…
+        </p>
+      ) : (
+        <>
+          <PhraseTokens phrase={phrase} />
+
+          {status === "unverified" && (
+            <div className="mt-2.5">
+              {/* The one plain-language "why" line, on first appearance of the
+                  unverified state. */}
+              <p className="mb-1 text-[11px] leading-relaxed text-haze-500">
+                {SAS_WHY_COMPARE}
+              </p>
+              <p className="mb-2 text-xs leading-relaxed text-haze-400">
+                {SAS_COMPARE_PROMPT}
+              </p>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={onConfirmMatch}
+                  className="flex h-8 items-center gap-1.5 rounded-full bg-signal/15 px-3 text-xs font-medium text-signal-300 transition hover:bg-signal hover:text-ink-950 active:scale-95"
+                >
+                  <ShieldIcon className="h-3.5 w-3.5" />
+                  They match
+                </button>
+                <button
+                  type="button"
+                  onClick={onFlagMismatch}
+                  className="flex h-8 items-center rounded-full px-3 text-xs font-medium text-haze-400 underline-offset-2 transition hover:text-danger-400 hover:underline active:scale-95"
+                >
+                  They don’t match
+                </button>
+              </div>
+            </div>
+          )}
+
+          {status === "verified" && (
+            <p className="mt-2 flex items-center gap-1.5 text-xs font-medium text-signal-300">
+              <CheckIcon className="h-4 w-4" />
+              Verified end-to-end
+            </p>
+          )}
+
+          {status === "flagged" && (
+            <div className="mt-2.5 flex items-start gap-2 rounded-lg border border-danger/40 bg-danger/10 px-3 py-2.5 text-danger-400">
+              <WarningIcon className="mt-0.5 h-4 w-4 shrink-0" />
+              <p className="text-xs font-medium leading-relaxed">
+                Not verified. {SAS_MISMATCH_WARNING}
+              </p>
+            </div>
+          )}
+        </>
+      )}
+
+      {/* Screen-reader announcement of terminal states. Polite for verified and
+          unavailable; assertive for flagged so a mismatch interrupts. Visually
+          hidden. */}
+      <p className="sr-only" role="status" aria-live="polite">
+        {status === "verified"
+          ? "Safety phrase verified end-to-end."
+          : status === "unavailable"
+            ? SAS_UNAVAILABLE_MESSAGE
+            : ""}
+      </p>
+      <p className="sr-only" role="alert" aria-live="assertive">
+        {status === "flagged" ? `Safety phrase not verified. ${SAS_MISMATCH_WARNING}` : ""}
+      </p>
+    </section>
   );
 }

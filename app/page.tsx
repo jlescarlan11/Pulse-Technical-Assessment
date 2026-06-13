@@ -6,9 +6,11 @@ import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
+import { type SasStatus } from "./components/SafetyPhrase";
 import { join, leave, poll, sendSignal, UnauthorizedError } from "@/lib/api";
 import { PeerSession, buildICEConfig, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
+import { deriveSAS, type SasPhrase } from "@/lib/sas";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 
 type Conn =
@@ -21,6 +23,14 @@ type Conn =
 type VideoState = "none" | "requesting" | "incoming" | "active";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+// Both peers' SDP descriptions (and thus DTLS fingerprints) are set by the time
+// the data channel opens, but reading them can momentarily race the open event.
+// Retry a handful of times on a short delay before giving up rather than leaving
+// verification stuck in "pending". The budget (5 retries at 500ms, ~2.5s) is
+// deliberately generous so slow signaling / throttled networks still resolve a
+// phrase instead of degrading straight to "unavailable".
+const SAS_RETRY_MS = 500;
+const SAS_MAX_RETRIES = 5;
 
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
@@ -39,6 +49,12 @@ export default function Home() {
     null,
   );
 
+  // Safety phrase (SAS) verification — derived once here from both DTLS
+  // fingerprints and passed to both surfaces so they show the SAME phrase and
+  // state. ADVISORY: never gates chat or video.
+  const [sasPhrase, setSasPhrase] = useState<SasPhrase | null>(null);
+  const [sasStatus, setSasStatus] = useState<SasStatus>("pending");
+
   const [conn, _setConn] = useState<Conn>({ kind: "idle" });
   const connRef = useRef<Conn>(conn);
   const setConn = (c: Conn) => {
@@ -56,6 +72,9 @@ export default function Home() {
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Guard so a SAS derivation retry/await that resolves after teardown can't
+  // resurrect a stale phrase onto the next peer. Bumped on every teardown.
+  const sasRunId = useRef(0);
   // Last known location, kept in a ref so a token-refresh re-join (triggered by
   // a 401) can re-register presence with the same coordinates.
   const locationRef = useRef<{ lat: number; lng: number } | null>(null);
@@ -85,32 +104,50 @@ export default function Home() {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
   }
 
-  // Token-aware signal sender. Pulls the current token from the ref, and on a
-  // 401 re-mints it once and retries so a rotated/expired token doesn't drop
-  // the message silently.
-  async function emitSignal(
-    toId: string,
-    type: SignalType,
-    payload?: string,
-  ): Promise<void> {
-    const token = tokenRef.current;
-    if (!token) return;
-    try {
-      await sendSignal(sessionId, toId, type, token, payload);
-    } catch (err) {
-      if (err instanceof UnauthorizedError) {
-        const fresh = await refreshToken();
-        if (fresh) {
-          try {
-            await sendSignal(sessionId, toId, type, fresh, payload);
-          } catch {}
-        }
+  // Derive the safety phrase from both DTLS fingerprints once the channel is
+  // open. Reads the live PeerSession; if either fingerprint isn't available yet
+  // it retries on a short delay. Tagged with the current sasRunId so a resolve
+  // that lands after teardown is dropped (verification never leaks across peers).
+  //
+  // TERMINAL failure: if deriveSAS throws, or the fingerprints never arrive
+  // within SAS_MAX_RETRIES, we move to "unavailable" — a distinct terminal
+  // state — rather than leaving the surfaces stuck on "pending" forever. SAS is
+  // advisory, so the connection itself is unaffected.
+  async function deriveSafetyPhrase(runId: number, attempt: number) {
+    if (sasRunId.current !== runId) return;
+    const ps = peerRef.current;
+    if (!ps) return;
+    const { local, remote } = ps.getFingerprints();
+    if (local && remote) {
+      try {
+        const phrase = await deriveSAS(local, remote);
+        if (sasRunId.current !== runId) return;
+        setSasPhrase(phrase);
+        setSasStatus("unverified");
+      } catch {
+        // Derivation threw — terminal. Phrase stays null; surface the calm,
+        // non-positive "unavailable" state so we don't hang on "pending".
+        if (sasRunId.current !== runId) return;
+        setSasStatus("unavailable");
       }
+      return;
+    }
+    if (attempt < SAS_MAX_RETRIES) {
+      setTimeout(() => void deriveSafetyPhrase(runId, attempt + 1), SAS_RETRY_MS);
+    } else {
+      // Retries exhausted and the fingerprints never both arrived — terminal.
+      if (sasRunId.current !== runId) return;
+      setSasStatus("unavailable");
     }
   }
 
   function teardown(message?: string) {
     if (requestTimer.current) clearTimeout(requestTimer.current);
+    // Invalidate any in-flight SAS derivation and clear verification so it can
+    // never leak onto the next peer.
+    sasRunId.current += 1;
+    setSasPhrase(null);
+    setSasStatus("pending");
     peerRef.current?.close();
     peerRef.current = null;
     setLocalStream(null);
@@ -143,6 +180,8 @@ export default function Home() {
           },
           onChannelOpen: () => {
             setConn({ kind: "connected", peerId });
+            // Begin safety-phrase derivation now that both descriptions exist.
+            void deriveSafetyPhrase(sasRunId.current, 0);
           },
         },
         iceConfig,
@@ -188,6 +227,30 @@ export default function Home() {
     }
   }
 
+  // Token-aware signal sender. Pulls the current token from the ref, and on a
+  // 401 re-mints it once and retries so a rotated/expired token doesn't drop
+  // the message silently.
+  async function emitSignal(
+    toId: string,
+    type: SignalType,
+    payload?: string,
+  ): Promise<void> {
+    const token = tokenRef.current;
+    if (!token) return;
+    try {
+      await sendSignal(sessionId, toId, type, token, payload);
+    } catch (err) {
+      if (err instanceof UnauthorizedError) {
+        const fresh = await refreshToken();
+        if (fresh) {
+          try {
+            await sendSignal(sessionId, toId, type, fresh, payload);
+          } catch {}
+        }
+      }
+    }
+  }
+
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
     setConn({ kind: "requesting", peerId });
@@ -230,6 +293,18 @@ export default function Home() {
       void emitSignal(c.peerId, "end");
     }
     teardown();
+  }
+
+  // SAS verification handlers — user-declared, no network calls. A real MITM
+  // can't be auto-detected (each side's local phrase is internally correct but
+  // differs from the other human's screen), so the human's judgement is the
+  // signal. "flagged" is sticky: there is no path back to "verified" here.
+  function onConfirmMatch() {
+    setSasStatus("verified");
+  }
+
+  function onFlagMismatch() {
+    setSasStatus("flagged");
   }
 
   function startVideoRequest() {
@@ -489,6 +564,10 @@ export default function Home() {
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
           peerId={activePeerId}
+          sasPhrase={sasPhrase}
+          sasStatus={sasStatus}
+          onConfirmMatch={onConfirmMatch}
+          onFlagMismatch={onFlagMismatch}
         />
       )}
 
@@ -523,6 +602,10 @@ export default function Home() {
           localStream={localStream}
           remoteStream={remoteStream}
           onEnd={endVideo}
+          sasPhrase={sasPhrase}
+          sasStatus={sasStatus}
+          onConfirmMatch={onConfirmMatch}
+          onFlagMismatch={onFlagMismatch}
         />
       )}
     </main>
