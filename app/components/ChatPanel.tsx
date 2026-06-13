@@ -122,25 +122,62 @@ export default function ChatPanel({
 
       {/* Messages */}
       <div ref={listRef} className="flex-1 space-y-2.5 overflow-y-auto px-4 py-5">
-        {messages.length === 0 && (
-          <div className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center">
-            <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-signal">
-              <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path
-                  d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5"
-                  stroke="currentColor"
-                  strokeWidth="1.6"
-                  strokeLinejoin="round"
-                />
-              </svg>
-            </span>
-            <p className="text-sm font-medium text-haze-200">Say hello.</p>
-            <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
-              Messages travel peer-to-peer and are never stored. When the tab
-              closes, the conversation is gone.
-            </p>
-          </div>
-        )}
+        {/* FIX 3 (M4) — the empty message area has two distinct calm states so
+            the body never contradicts the composer:
+              - NOT connected (handshake): a quiet connecting-specific state
+                that matches the header "Connecting…/Still connecting…" status
+                and the disabled "Connecting…" composer. No "Say hello." while
+                you can't type yet.
+              - connected, no messages: the real "Say hello." empty state.
+            Both are gated on messages.length === 0. aria-live=polite so a
+            screen reader hears the body settle from connecting to ready without
+            stealing focus; reduced-motion users get the same static layout
+            (globals.css collapses the fade). */}
+        {messages.length === 0 &&
+          (connected ? (
+            <div
+              role="status"
+              aria-live="polite"
+              className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center"
+            >
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-signal">
+                <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path
+                    d="M4 6.5A2.5 2.5 0 0 1 6.5 4h11A2.5 2.5 0 0 1 20 6.5v7A2.5 2.5 0 0 1 17.5 16H9l-4 4v-4H6.5"
+                    stroke="currentColor"
+                    strokeWidth="1.6"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              </span>
+              <p className="text-sm font-medium text-haze-200">Say hello.</p>
+              <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
+                Messages travel peer-to-peer and are never stored. When the tab
+                closes, the conversation is gone.
+              </p>
+            </div>
+          ) : (
+            <div
+              role="status"
+              aria-live="polite"
+              className="animate-fade-up mt-10 flex flex-col items-center gap-3 px-6 text-center"
+            >
+              {/* Quiet connecting state: a steady haze dot (icon + text, not
+                  colour alone) that mirrors the header status. The pulse is
+                  animate-pulse, which globals.css holds steady at full opacity
+                  under prefers-reduced-motion. */}
+              <span className="flex h-12 w-12 items-center justify-center rounded-full bg-ink-700/60 text-haze-300">
+                <span className="h-2.5 w-2.5 animate-pulse rounded-full bg-haze-400" />
+              </span>
+              <p className="text-sm font-medium text-haze-300">
+                {slowConnect ? "Still connecting…" : "Connecting…"}
+              </p>
+              <p className="max-w-[15rem] text-xs leading-relaxed text-haze-500">
+                Opening a private peer-to-peer channel. You can send a signal
+                once it’s ready.
+              </p>
+            </div>
+          ))}
         {messages.map((m) => (
           <div
             key={m.id}

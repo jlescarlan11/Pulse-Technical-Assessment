@@ -21,31 +21,38 @@ const COPY = {
   // Pre-call (unchanged): before any remote stream has arrived.
   waiting: "Waiting for stranger’s video…",
 
+  // M5 (video) — escalated pre-call copy. If the peer accepted video but no
+  // remoteStream arrives after a grace window, the camera may be stuck. Soften
+  // the wording and lean on the always-available End button instead of waiting
+  // forever. Honest: it names a likely camera problem, no presence/gaze claims.
+  waitingSlow: "Still waiting — they may be having camera trouble",
+  waitingSlowHint: "You can leave anytime with End video below.",
+
   // Story 4 — remote feed, mid-call, stranger's tab is inactive.
   peerAwayTitle: "Stranger stepped away",
   peerAwayBody: "Their video pauses while their tab is inactive. Audio is still connected.",
 
-  // Privacy Shield — local PiP "not shared" badge label (shared across all
-  // gated states). The self-view stays live underneath; this short word marks
-  // that the outgoing feed is held. Sub-lines below name the cause honestly.
+  // Privacy Shield — local PiP "not shared" badge. The self-view stays live
+  // underneath; the badge is a SINGLE compact pill (icon + short label) that
+  // must fit on one line at the ~128px PiP width. The full-screen overlay
+  // already carries the "why", so the PiP never repeats a long explanation.
+  //
+  // FIX 1: the badge no longer renders a wrapping sub-line. Each gated case
+  // picks one of these short, one-line labels. All are honest tab/presence
+  // language (no gaze/screenshot claims) and short enough not to wrap; the pill
+  // also truncates gracefully as a final guard.
+  //
+  // Default / peer-attributed case: you're present, but the outgoing feed is
+  // held because the stranger stepped away.
   notSharedLabel: "Not shared",
 
-  // Your tab is inactive, so the engine stopped sending your clone. Your tab is
-  // hidden when this is true, so you rarely see it live; on return it should
-  // still read sensibly. Names the mechanism (this tab is backgrounded).
-  notSharedLocalAway: "Not shared while your tab is in the background",
+  // Your own tab is backgrounded, so the engine stopped sending your clone.
+  notSharedLocalAway: "Tab in background",
 
-  // You're present but the stranger left, so your outgoing video is held back
-  // too. Attributes the cause to the stranger so it ties to the big overlay.
-  notSharedPeerAway: "Not shared · they can’t see you while they’re away",
-
-  // BUG-2 — the very start of a call. peerAway initialises true (fail-closed)
-  // for ~1 RTT before the first presence heartbeat, so the outgoing clone is
-  // held even though the stranger never actually stepped away. Until the
-  // stranger has been seen present once (peerHasBeenPresent), we must NOT
-  // attribute the hold to them. Show a neutral, honest connecting line —
-  // tab/presence language only, no "they're away".
-  notSharedConnecting: "Connecting · not shared yet",
+  // BUG-2 — pre-first-heartbeat. peerAway initialises true (fail-closed) for
+  // ~1 RTT, so the outgoing clone is held before the stranger has ever been
+  // seen present. Don't blame them — a neutral connecting label.
+  notSharedConnecting: "Connecting…",
 
   // The normal "You" label on the live self-view when mutually present.
   selfLabel: "You",
@@ -143,6 +150,21 @@ export default function VideoPanel({
     if (!localAway) setAnnouncement(COPY.announceLocalBack);
   }
 
+  // M5 (video) — slow-connect escalation. Mirrors ChatPanel's slowConnect: if
+  // the pre-call "Waiting…" state persists past a grace window with no remote
+  // stream, the peer's camera may be stuck, so we soften the copy and reinforce
+  // that End is available. Purely presentational; the timer is cleaned up on
+  // unmount and whenever a stream arrives (the early return below skips arming
+  // it). Once hasConnected latches the waiting block never renders again, so a
+  // residual `true` is inert — exactly ChatPanel's connected-early-return shape,
+  // with no setState inside the effect. Reduced-motion safe (no motion).
+  const [slowWait, setSlowWait] = useState(false);
+  useEffect(() => {
+    if (remoteStream || hasConnected) return;
+    const t = setTimeout(() => setSlowWait(true), 9000);
+    return () => clearTimeout(t);
+  }, [remoteStream, hasConnected]);
+
   useEffect(() => {
     if (localRef.current && localRef.current.srcObject !== localStream) {
       localRef.current.srcObject = localStream;
@@ -162,11 +184,11 @@ export default function VideoPanel({
   // combinations differ only in the full-screen REMOTE overlay and in the
   // compact "not shared" BADGE laid over the (still-visible) self-view:
   //   neither           -> live remote + live self-view, just the "You" label
-  //   only-peer-away     -> remote "Stranger stepped away" + PiP "not shared (they're away)"
-  //   only-local-away    -> remote stays live + PiP "not shared (your tab is backgrounded)"
-  //   both-away          -> remote "Stranger stepped away" + PiP "not shared (your tab is backgrounded)"
+  //   only-peer-away     -> remote "Stranger stepped away" + PiP "Not shared"
+  //   only-local-away    -> remote stays live + PiP "Tab in background"
+  //   both-away          -> remote "Stranger stepped away" + PiP "Tab in background"
   // The local-away cause wins the badge because it describes YOUR own tab
-  // state; the peer-attributed line is for when you're present but holding.
+  // state; the peer-attributed label is for when you're present but holding.
   //
   // M3: gate the mid-call overlay on peerHasBeenPresent so the fail-closed
   // initial peerAway=true never flashes the overlay before the first frame.
@@ -176,12 +198,11 @@ export default function VideoPanel({
   // this only drives the non-blocking "not shared" badge over the PiP.
   const outgoingHeld = localAway || peerAway;
 
-  // BUG-2: the badge must only blame the stranger ("they can't see you while
-  // they're away") once they have actually been seen present — the same
-  // peerHasBeenPresent latch the full-screen overlay uses. Before the first
-  // heartbeat peerAway is still its fail-closed `true`, so we attribute the
-  // hold to nothing and fall through to the neutral "Connecting · not shared
-  // yet" line instead.
+  // BUG-2: the badge must only blame the stranger once they have actually been
+  // seen present — the same peerHasBeenPresent latch the full-screen overlay
+  // uses. Before the first heartbeat peerAway is still its fail-closed `true`,
+  // so we attribute the hold to nothing and fall through to the neutral
+  // "Connecting…" label instead.
   const heldByPeer = !localAway && peerAway && peerHasBeenPresent;
 
   // m1 (no escape hatch): a full-screen stepped-away overlay could otherwise
@@ -221,14 +242,15 @@ export default function VideoPanel({
     [],
   );
 
-  // The honest sub-line for the "not shared" badge, picking the same attribution
-  // the matrix above describes. localAway wins (it's your own tab); then the
-  // peer-attributed line once they've been present; otherwise the neutral
-  // pre-heartbeat connecting line.
-  const notSharedReason = localAway
+  // FIX 1 — the PiP badge is now a SINGLE compact pill: a short, one-line label
+  // chosen by the same attribution the matrix above describes. localAway wins
+  // (it's your own tab); then the peer-attributed default once they've been
+  // present; otherwise the neutral pre-heartbeat connecting label. No wrapping
+  // sub-line — the full-screen overlay already conveys the "why".
+  const notSharedPillLabel = localAway
     ? COPY.notSharedLocalAway
     : heldByPeer
-      ? COPY.notSharedPeerAway
+      ? COPY.notSharedLabel
       : COPY.notSharedConnecting;
 
   return (
@@ -277,9 +299,25 @@ export default function VideoPanel({
                 </svg>
               </span>
             </div>
-            <p className="relative font-mono text-xs uppercase tracking-[0.18em] text-haze-300">
-              {COPY.waiting}
-            </p>
+            {/* M5 (video) — escalate after the grace window. Before that, the
+                calm pre-call copy; after, softer "camera trouble" wording plus
+                a hint that End is always available. aria-live=polite so a screen
+                reader hears the escalation without it stealing focus; no motion,
+                so it is reduced-motion safe. */}
+            <div
+              role="status"
+              aria-live="polite"
+              className="relative flex flex-col items-center gap-2 px-6 text-center"
+            >
+              <p className="font-mono text-xs uppercase tracking-[0.18em] text-haze-300">
+                {slowWait ? COPY.waitingSlow : COPY.waiting}
+              </p>
+              {slowWait && (
+                <p className="max-w-xs text-xs leading-relaxed text-haze-500">
+                  {COPY.waitingSlowHint}
+                </p>
+              )}
+            </div>
           </div>
         )}
 
@@ -351,27 +389,30 @@ export default function VideoPanel({
             />
 
             {outgoingHeld ? (
-              /* "Not shared" badge — a glass-faint pill riding a subtle scrim
-                 strip at the bottom of the PiP. The live face above stays
-                 fully visible; the scrim strip only seats the text for legible
-                 contrast. State is conveyed by icon + text (never colour alone)
-                 and the strings name the tab/presence cause honestly: the feed
-                 isn't being SENT, which is true. No motion of its own, so it is
-                 reduced-motion safe. */
-              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex flex-col gap-1 bg-gradient-to-t from-ink-950/85 via-ink-950/55 to-transparent px-2 pb-2 pt-6">
-                <span className="glass-faint flex w-fit items-center gap-1.5 rounded-full px-2 py-0.5">
-                  {/* Slashed-eye-free "not sending" glyph: a paper-plane (send)
-                      with a slash through it. Marks "not being sent", honest. */}
-                  <svg className="h-3 w-3 text-haze-100" viewBox="0 0 24 24" fill="none" aria-hidden>
+              /* FIX 1 — "Not shared" badge as a SINGLE compact pill: icon + one
+                 short label, no wrapping sub-line. The live face above stays
+                 fully visible; a subtle scrim strip only seats the pill for
+                 legible contrast. State is conveyed by icon + text (never colour
+                 alone) and every label is honest tab/presence language: the feed
+                 isn't being SENT, which is true. The pill stays on one line at
+                 the ~128px PiP width (max-w + truncate guard against overflow)
+                 and has no motion of its own, so it is reduced-motion safe. */
+              <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-start bg-gradient-to-t from-ink-950/85 via-ink-950/45 to-transparent px-2 pb-2 pt-6">
+                <span className="flex max-w-full items-center gap-1.5 rounded-full bg-ink-950/70 px-2 py-0.5 backdrop-blur">
+                  {/* Slashed "send" (paper-plane) glyph: marks "not being sent",
+                      honest — no eye/gaze imagery. */}
+                  <svg
+                    className="h-3 w-3 shrink-0 text-haze-100"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden
+                  >
                     <path d="M4 12l15-7-4 15-3.5-5L4 12z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
                     <path d="M4 4l16 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
                   </svg>
-                  <span className="font-mono text-[10px] uppercase tracking-wider text-haze-100">
-                    {COPY.notSharedLabel}
+                  <span className="truncate font-mono text-[10px] uppercase tracking-wider text-haze-100">
+                    {notSharedPillLabel}
                   </span>
-                </span>
-                <span className="text-[10px] leading-tight text-haze-200">
-                  {notSharedReason}
                 </span>
               </div>
             ) : (

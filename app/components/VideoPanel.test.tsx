@@ -8,9 +8,18 @@
  * separate clone sent to the peer is gated), so the PiP <video> stays visible
  * in every state and is NEVER covered by a black "Paused" box. When the
  * outgoing clone is held (localAway || peerAway) a compact, non-blocking
- * "Not shared" badge is laid over the live self-view, with an honest
- * tab/presence sub-line. The remote-side full-screen "Stranger stepped away"
- * overlay, the Live/Away pill, and the aria-live announcements are UNCHANGED.
+ * "not shared" badge is laid over the live self-view.
+ *
+ * FIX 1 (Phase 4 polish): the badge is now a SINGLE compact pill — icon + one
+ * short, one-line label — instead of a pill PLUS a long wrapping sub-line. At
+ * the ~128px PiP width the old sub-line wrapped to ~4 ugly lines, so the "why"
+ * is left to the full-screen overlay and the pill carries only a short label
+ * that varies per gated case:
+ *   - only-peer-away  -> "Not shared"        (you're present, they stepped away)
+ *   - local-away      -> "Tab in background" (your own tab is backgrounded)
+ *   - pre-heartbeat   -> "Connecting…"       (fail-closed, never blame the peer)
+ * The remote-side full-screen "Stranger stepped away" overlay, the Live/Away
+ * pill, and the aria-live announcements are UNCHANGED.
  *
  * We test observable text/roles, not internals. State is conveyed by icon+text
  * (not colour alone).
@@ -19,7 +28,7 @@
  * API suites are unaffected.
  */
 import "@testing-library/jest-dom";
-import { render, screen, within } from "@testing-library/react";
+import { act, render, screen, within } from "@testing-library/react";
 import VideoPanel from "./VideoPanel";
 
 // A stand-in MediaStream; VideoPanel only assigns it to <video>.srcObject and
@@ -65,13 +74,13 @@ function renderPeerSteppedAway(
  * heading. The polite aria-live announcer now uses a longer, distinct sentence
  * ("Stranger stepped away. Your video is no longer shared…"), so an exact-text
  * match on "Stranger stepped away" returns only the overlay heading. We still
- * exclude any match inside the status region to stay robust if the announcer
+ * exclude any match inside a status region to stay robust if the announcer
  * wording changes.
  */
 function peerAwayOverlayTitle() {
-  const status = screen.getByRole("status");
+  const statuses = screen.getAllByRole("status");
   const matches = screen.getAllByText("Stranger stepped away");
-  const visible = matches.find((el) => !status.contains(el));
+  const visible = matches.find((el) => !statuses.some((s) => s.contains(el)));
   if (!visible) throw new Error("peer-away overlay title not found outside the announcer");
   return visible;
 }
@@ -89,20 +98,21 @@ describe("VideoPanel away matrix", () => {
     expect(screen.getByText("Live")).toBeInTheDocument();
   });
 
-  it("only peer away -> remote 'Stranger stepped away' + PiP 'Not shared' (peer-attributed)", () => {
+  it("only peer away -> remote 'Stranger stepped away' + compact PiP 'Not shared' pill", () => {
     // M3: establish the stranger as present first, then have them step away.
     renderPeerSteppedAway({ localAway: false });
 
     expect(peerAwayOverlayTitle()).toBeInTheDocument();
-    // Privacy Shield: the self-view stays LIVE; a non-blocking "Not shared"
-    // badge explains the outgoing clone is held while you remain present.
+    // FIX 1: the self-view stays LIVE; the badge is a SINGLE compact pill that
+    // reads just "Not shared" (peer-attributed). No wrapping sub-line.
     expect(screen.getByText("Not shared")).toBeInTheDocument();
+    // The old long peer-attributed sub-line is gone — it must NOT render.
     expect(
-      screen.getByText("Not shared · they can’t see you while they’re away"),
-    ).toBeInTheDocument();
-    // BUG-2: this only-peer-away attribution must be the genuine mid-call one,
-    // never the pre-heartbeat connecting line.
-    expect(screen.queryByText("Connecting · not shared yet")).not.toBeInTheDocument();
+      screen.queryByText("Not shared · they can’t see you while they’re away"),
+    ).not.toBeInTheDocument();
+    // BUG-2: this only-peer-away pill must be the genuine mid-call one, never
+    // the pre-heartbeat connecting label.
+    expect(screen.queryByText("Connecting…")).not.toBeInTheDocument();
     // The "You" label is replaced by the badge while the feed is held.
     expect(screen.queryByText("You")).not.toBeInTheDocument();
     // M5: the HUD pill agrees with the overlay — calm "Away", no "Live".
@@ -110,33 +120,28 @@ describe("VideoPanel away matrix", () => {
     expect(screen.queryByText("Live")).not.toBeInTheDocument();
   });
 
-  it("only local away -> PiP 'Not shared' with backgrounded-tab sub-line, no peer overlay", () => {
+  it("only local away -> compact PiP 'Tab in background' pill, no peer overlay", () => {
     renderPanel({ peerAway: false, localAway: true });
 
-    expect(screen.getByText("Not shared")).toBeInTheDocument();
-    expect(
-      screen.getByText("Not shared while your tab is in the background"),
-    ).toBeInTheDocument();
+    // FIX 1: your own backgrounded tab is named by the short pill label.
+    expect(screen.getByText("Tab in background")).toBeInTheDocument();
     expect(screen.queryByText("Stranger stepped away")).not.toBeInTheDocument();
-    // The local-away cause wins the badge, so the peer-attributed line is absent.
+    // The local-away cause wins the badge, so the peer-attributed "Not shared"
+    // pill is absent and no long sub-line wraps.
+    expect(screen.queryByText("Not shared")).not.toBeInTheDocument();
     expect(
-      screen.queryByText("Not shared · they can’t see you while they’re away"),
+      screen.queryByText("Not shared while your tab is in the background"),
     ).not.toBeInTheDocument();
   });
 
-  it("both away -> remote overlay present + PiP 'Not shared' (your-tab cause wins)", () => {
+  it("both away -> remote overlay present + compact PiP 'Tab in background' (your-tab cause wins)", () => {
     // M3: establish presence first, then both step away.
     renderPeerSteppedAway({ localAway: true });
 
     expect(peerAwayOverlayTitle()).toBeInTheDocument();
-    expect(screen.getByText("Not shared")).toBeInTheDocument();
-    // Badge precedence: your own backgrounded tab is named over the peer line.
-    expect(
-      screen.getByText("Not shared while your tab is in the background"),
-    ).toBeInTheDocument();
-    expect(
-      screen.queryByText("Not shared · they can’t see you while they’re away"),
-    ).not.toBeInTheDocument();
+    // Badge precedence: your own backgrounded tab is named over the peer label.
+    expect(screen.getByText("Tab in background")).toBeInTheDocument();
+    expect(screen.queryByText("Not shared")).not.toBeInTheDocument();
   });
 
   it("conveys away state with icon + text, not colour alone", () => {
@@ -177,32 +182,26 @@ describe("VideoPanel M3 — no call-start flicker", () => {
 });
 
 describe("VideoPanel BUG-2 — startup PiP attribution", () => {
-  it("pre-first-heartbeat (peerAway fail-closed true, never present): badge shows neutral 'Connecting · not shared yet', NOT the peer-attributed line", () => {
+  it("pre-first-heartbeat (peerAway fail-closed true, never present): pill shows neutral 'Connecting…', NOT the peer-attributed 'Not shared'", () => {
     // Fresh call: stream is connected but peerAway is still its initial
     // fail-closed `true` and the stranger has NEVER been seen present, so the
     // outgoing clone is held even though the stranger didn't actually step away.
-    // The badge must not blame them — it shows the neutral connecting line.
+    // The badge must not blame them — it shows the neutral connecting label.
     renderPanel({ peerAway: true, localAway: false });
 
-    expect(screen.getByText("Not shared")).toBeInTheDocument();
-    expect(screen.getByText("Connecting · not shared yet")).toBeInTheDocument();
+    expect(screen.getByText("Connecting…")).toBeInTheDocument();
     // No stranger-attributed copy before the first heartbeat.
-    expect(
-      screen.queryByText("Not shared · they can’t see you while they’re away"),
-    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Not shared")).not.toBeInTheDocument();
     expect(screen.queryByText("Stranger stepped away")).not.toBeInTheDocument();
   });
 
-  it("once the stranger has been present, a later step-away switches the badge to the peer-attributed line", () => {
+  it("once the stranger has been present, a later step-away switches the pill to the peer-attributed 'Not shared'", () => {
     // present -> away: now the hold is genuinely the stranger's doing, so the
-    // badge is allowed to attribute it to them and the connecting line is gone.
+    // badge is allowed to attribute it to them and the connecting label is gone.
     renderPeerSteppedAway({ localAway: false });
 
     expect(screen.getByText("Not shared")).toBeInTheDocument();
-    expect(
-      screen.getByText("Not shared · they can’t see you while they’re away"),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Connecting · not shared yet")).not.toBeInTheDocument();
+    expect(screen.queryByText("Connecting…")).not.toBeInTheDocument();
   });
 });
 
@@ -215,10 +214,62 @@ describe("VideoPanel pre-call waiting state", () => {
     // though peerAway is true — it only appears once a stream has connected.
     expect(screen.queryByText("Stranger stepped away")).not.toBeInTheDocument();
   });
+
+  it("M5: escalates the waiting copy after the grace window when no stream arrives", () => {
+    jest.useFakeTimers();
+    try {
+      renderPanel({ remoteStream: null, peerAway: true, localAway: false });
+
+      // Before the grace window: the calm pre-call copy, no camera-trouble hint.
+      expect(screen.getByText(/Waiting for stranger’s video/)).toBeInTheDocument();
+      expect(
+        screen.queryByText("Still waiting — they may be having camera trouble"),
+      ).not.toBeInTheDocument();
+
+      // After the grace window: softer copy + a reminder that End is available.
+      // (act-wrapped so the state update from the timer is flushed.)
+      act(() => {
+        jest.advanceTimersByTime(9000);
+      });
+
+      expect(
+        screen.getByText("Still waiting — they may be having camera trouble"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("You can leave anytime with End video below."),
+      ).toBeInTheDocument();
+      // The End control is force-shown in the pre-stream state.
+      expect(screen.getByText("End video")).toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("M5: does NOT escalate once a remote stream has arrived", () => {
+    jest.useFakeTimers();
+    try {
+      // Stream present from the start: we never enter the waiting state, so the
+      // escalation timer must never surface the camera-trouble copy.
+      renderPanel({ remoteStream: fakeStream, peerAway: false, localAway: false });
+      act(() => {
+        jest.advanceTimersByTime(20000);
+      });
+
+      expect(
+        screen.queryByText("Still waiting — they may be having camera trouble"),
+      ).not.toBeInTheDocument();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe("VideoPanel aria-live presence announcements", () => {
   function liveRegion() {
+    // Story 7's polite presence announcer is the SR-only region. The pre-call
+    // waiting copy also uses role=status, but that block is absent whenever a
+    // remote stream is present (every test here renders with one), so the
+    // announcer is the sole status node.
     return screen.getByRole("status");
   }
 
