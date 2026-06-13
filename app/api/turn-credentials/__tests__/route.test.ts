@@ -1,39 +1,65 @@
 import { GET } from "../route";
 
+// The route calls the Cloudflare Realtime TURN API:
+//   POST https://rtc.live.cloudflare.com/v1/turn/keys/<keyId>/credentials/generate-ice-servers
+// with body { ttl: 86400 }. Cloudflare responds (HTTP 201) with a BARE object:
+//   { iceServers: CloudflareIceServer[] }  -- no success/result wrapper.
+// The route picks the first entry that has both username and credential and
+// returns { urls, username, credential } with Cache-Control: private, max-age=300.
+
+const TURN_KEY_ID = "key-abc-123";
+const API_TOKEN = "token-456";
+
+// Mirrors a realistic Cloudflare success body: first entry is STUN-only (no
+// creds), second carries the TURN credentials. The selection logic must skip
+// the STUN entry and pick the TURN one.
+const cloudflareSuccessBody = {
+  iceServers: [
+    { urls: ["stun:stun.cloudflare.com:3478", "stun:stun.cloudflare.com:53"] },
+    {
+      urls: [
+        "turn:turn.cloudflare.com:3478?transport=udp",
+        "turn:turn.cloudflare.com:3478?transport=tcp",
+        "turns:turn.cloudflare.com:5349?transport=tcp",
+        "turns:turn.cloudflare.com:443?transport=tcp",
+      ],
+      username: "hex-username-abc",
+      credential: "hex-credential-xyz",
+    },
+  ],
+};
+
+const turnUrls = cloudflareSuccessBody.iceServers[1].urls;
+
 describe("GET /api/turn-credentials", () => {
   let originalFetch: typeof global.fetch;
   let originalEnv: NodeJS.ProcessEnv;
+  let errorSpy: jest.SpyInstance;
 
   beforeEach(() => {
     originalFetch = global.fetch;
     originalEnv = { ...process.env };
+    // The route logs via console.error on failure branches; silence it so the
+    // suite output stays clean while still allowing assertions on behavior.
+    errorSpy = jest.spyOn(console, "error").mockImplementation(() => {});
   });
 
   afterEach(() => {
     global.fetch = originalFetch;
     process.env = originalEnv;
+    errorSpy.mockRestore();
   });
 
-  it("returns 200 with TURN credentials on success", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
-
-    const mockCloudflareResponse = {
-      success: true,
-      result: {
-        iceServers: [
-          {
-            urls: ["turn:turn.cloudflare.com:3478"],
-            username: "cloudflare-user-1234",
-            credential: "cloudflare-pass-5678",
-          },
-        ],
-      },
-    };
+  // Invariant: a healthy Cloudflare response yields the client contract
+  // { urls, username, credential } at 200 with a private 5-minute cache.
+  it("returns 200 with the TURN credentials on success", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
     global.fetch = jest.fn().mockResolvedValueOnce({
       ok: true,
-      json: async () => mockCloudflareResponse,
+      status: 201,
+      json: async () => cloudflareSuccessBody,
     });
 
     const response = await GET();
@@ -41,42 +67,57 @@ describe("GET /api/turn-credentials", () => {
     expect(response.status).toBe(200);
     const data = await response.json();
     expect(data).toEqual({
-      urls: ["turn:turn.cloudflare.com:3478"],
-      username: "cloudflare-user-1234",
-      credential: "cloudflare-pass-5678",
+      urls: turnUrls,
+      username: "hex-username-abc",
+      credential: "hex-credential-xyz",
     });
     expect(response.headers.get("Cache-Control")).toBe("private, max-age=300");
   });
 
+  // Invariant: misconfiguration (no key id) fails closed with 500 and never
+  // calls Cloudflare.
   it("returns 500 when CLOUDFLARE_TURN_TOKEN_ID is missing", async () => {
     delete process.env.CLOUDFLARE_TURN_TOKEN_ID;
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
+
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock;
 
     const response = await GET();
 
     expect(response.status).toBe(500);
     const data = await response.json();
     expect(data.error).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
+  // Invariant: misconfiguration (no API token) fails closed with 500 and never
+  // calls Cloudflare.
   it("returns 500 when CLOUDFLARE_TURN_API_TOKEN is missing", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
     delete process.env.CLOUDFLARE_TURN_API_TOKEN;
 
+    const fetchMock = jest.fn();
+    global.fetch = fetchMock;
+
     const response = await GET();
 
     expect(response.status).toBe(500);
     const data = await response.json();
     expect(data.error).toBeTruthy();
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
-  it("returns 500 when Cloudflare returns non-OK status", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+  // Invariant: an upstream auth/validation failure (non-ok HTTP) is not leaked
+  // to the client as a partial/empty success; it surfaces as 500.
+  it("returns 500 when Cloudflare returns a non-OK status", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
     global.fetch = jest.fn().mockResolvedValueOnce({
       ok: false,
       status: 401,
+      text: async () => "Unauthorized",
     });
 
     const response = await GET();
@@ -86,13 +127,33 @@ describe("GET /api/turn-credentials", () => {
     expect(data.error).toBeTruthy();
   });
 
-  it("returns 500 when Cloudflare returns success: false", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+  it("returns 500 when Cloudflare returns a 400 error", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
+
+    global.fetch = jest.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 400,
+      text: async () => "Bad Request",
+    });
+
+    const response = await GET();
+
+    expect(response.status).toBe(500);
+    const data = await response.json();
+    expect(data.error).toBeTruthy();
+  });
+
+  // Invariant: a 2xx body that doesn't match the expected shape (iceServers
+  // missing) is rejected rather than passed through.
+  it("returns 500 when iceServers is missing from the response", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
     global.fetch = jest.fn().mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ success: false, errors: [{ message: "Invalid" }] }),
+      status: 201,
+      json: async () => ({}),
     });
 
     const response = await GET();
@@ -102,13 +163,14 @@ describe("GET /api/turn-credentials", () => {
     expect(data.error).toBeTruthy();
   });
 
-  it("returns 500 when Cloudflare response missing iceServers", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+  it("returns 500 when iceServers is not an array", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
     global.fetch = jest.fn().mockResolvedValueOnce({
       ok: true,
-      json: async () => ({ success: true, result: {} }),
+      status: 201,
+      json: async () => ({ iceServers: { username: "x", credential: "y" } }),
     });
 
     const response = await GET();
@@ -118,25 +180,21 @@ describe("GET /api/turn-credentials", () => {
     expect(data.error).toBeTruthy();
   });
 
-  it("returns 500 when no TURN server entry (missing username/credential)", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+  // Invariant: a structurally valid response that contains only STUN entries
+  // (no usable TURN credentials) is a failure, not a silent empty success.
+  it("returns 500 when no entry has username and credential (STUN-only)", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
-    const mockCloudflareResponse = {
-      success: true,
-      result: {
+    global.fetch = jest.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 201,
+      json: async () => ({
         iceServers: [
-          {
-            urls: ["stun:stun.cloudflare.com:3478"],
-            // no username/credential for STUN
-          },
+          { urls: ["stun:stun.cloudflare.com:3478"] },
+          { urls: ["stun:stun.cloudflare.com:53"] },
         ],
-      },
-    };
-
-    global.fetch = jest.fn().mockResolvedValueOnce({
-      ok: true,
-      json: async () => mockCloudflareResponse,
+      }),
     });
 
     const response = await GET();
@@ -146,9 +204,11 @@ describe("GET /api/turn-credentials", () => {
     expect(data.error).toBeTruthy();
   });
 
-  it("returns 500 when network fetch throws", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+  // Invariant: a transport-level failure (thrown fetch) is contained and
+  // returned as 500 rather than crashing the route.
+  it("returns 500 when the network fetch throws", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
     global.fetch = jest.fn().mockRejectedValueOnce(new Error("Network error"));
 
@@ -159,62 +219,47 @@ describe("GET /api/turn-credentials", () => {
     expect(data.error).toBeTruthy();
   });
 
-  it("calls Cloudflare API with correct parameters", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
+  // Invariant: the route calls the Cloudflare Realtime TURN endpoint correctly
+  // -- right URL (keyed by the token id), POST, bearer auth, and { ttl: 86400 }.
+  it("calls the Cloudflare Realtime TURN API with correct URL, method, auth, and body", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
-    const mockCloudflareResponse = {
-      success: true,
-      result: {
-        iceServers: [
-          {
-            urls: ["turn:turn.cloudflare.com:3478"],
-            username: "user",
-            credential: "pass",
-          },
-        ],
-      },
-    };
-
-    global.fetch = jest.fn().mockResolvedValueOnce({
+    const fetchMock = jest.fn().mockResolvedValueOnce({
       ok: true,
-      json: async () => mockCloudflareResponse,
+      status: 201,
+      json: async () => cloudflareSuccessBody,
     });
+    global.fetch = fetchMock;
 
     await GET();
 
-    expect(global.fetch).toHaveBeenCalledWith(
-      "https://api.cloudflare.com/client/v4/accounts/account-123/rtc/config",
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [calledUrl, calledOptions] = fetchMock.mock.calls[0];
+
+    expect(calledUrl).toBe(
+      `https://rtc.live.cloudflare.com/v1/turn/keys/${TURN_KEY_ID}/credentials/generate-ice-servers`,
+    );
+    expect(calledOptions).toEqual(
       expect.objectContaining({
         method: "POST",
         headers: expect.objectContaining({
-          Authorization: "Bearer token-456",
+          Authorization: `Bearer ${API_TOKEN}`,
           "Content-Type": "application/json",
         }),
+        body: JSON.stringify({ ttl: 86400 }),
       }),
     );
   });
 
-  it("includes AbortSignal timeout in fetch call", async () => {
-    process.env.CLOUDFLARE_TURN_TOKEN_ID = "account-123";
-    process.env.CLOUDFLARE_TURN_API_TOKEN = "token-456";
-
-    const mockCloudflareResponse = {
-      success: true,
-      result: {
-        iceServers: [
-          {
-            urls: ["turn:turn.cloudflare.com:3478"],
-            username: "user",
-            credential: "pass",
-          },
-        ],
-      },
-    };
+  it("includes an AbortSignal timeout in the fetch call", async () => {
+    process.env.CLOUDFLARE_TURN_TOKEN_ID = TURN_KEY_ID;
+    process.env.CLOUDFLARE_TURN_API_TOKEN = API_TOKEN;
 
     global.fetch = jest.fn().mockResolvedValueOnce({
       ok: true,
-      json: async () => mockCloudflareResponse,
+      status: 201,
+      json: async () => cloudflareSuccessBody,
     });
 
     await GET();

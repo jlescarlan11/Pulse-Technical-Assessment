@@ -8,11 +8,7 @@ interface CloudflareIceServer {
 }
 
 interface CloudflareRTCResponse {
-  success: boolean;
-  result?: {
-    iceServers: CloudflareIceServer[];
-  };
-  errors?: Array<{ message: string }>;
+  iceServers: CloudflareIceServer[];
 }
 
 interface TurnCredentialsResponse {
@@ -22,18 +18,10 @@ interface TurnCredentialsResponse {
 }
 
 export async function GET(): Promise<Response> {
-  const accountId = process.env.CLOUDFLARE_TURN_TOKEN_ID;
+  const turnKeyId = process.env.CLOUDFLARE_TURN_TOKEN_ID;
   const apiToken = process.env.CLOUDFLARE_TURN_API_TOKEN;
-  // TURN App ID is optional; if provided, it will be used instead of accountId
-  const turnAppId = process.env.CLOUDFLARE_TURN_APP_ID;
 
-  console.log("[DEBUG] TURN credentials endpoint called");
-  console.log("[DEBUG] accountId/tokenId present:", !!accountId);
-  console.log("[DEBUG] apiToken present:", !!apiToken);
-  console.log("[DEBUG] turnAppId present:", !!turnAppId);
-
-  if (!accountId || !apiToken) {
-    console.error("[DEBUG] Missing environment variables - TURN not configured");
+  if (!turnKeyId || !apiToken) {
     return Response.json(
       { error: "TURN credentials not configured" },
       { status: 500 }
@@ -41,10 +29,9 @@ export async function GET(): Promise<Response> {
   }
 
   try {
-    // Cloudflare TURN credentials endpoint (accounts API)
-    // Format: https://api.cloudflare.com/client/v4/accounts/{accountId}/rtc/config
-    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/rtc/config`;
-    console.log("[DEBUG] Calling Cloudflare TURN API URL:", url);
+    // Cloudflare Realtime TURN: generate short-lived ICE server credentials.
+    // https://developers.cloudflare.com/realtime/turn/generate-credentials
+    const url = `https://rtc.live.cloudflare.com/v1/turn/keys/${turnKeyId}/credentials/generate-ice-servers`;
 
     const response = await fetch(url, {
       method: "POST",
@@ -52,42 +39,35 @@ export async function GET(): Promise<Response> {
         Authorization: `Bearer ${apiToken}`,
         "Content-Type": "application/json",
       },
+      body: JSON.stringify({ ttl: 86400 }),
       signal: AbortSignal.timeout(5000),
     });
 
-    console.log("[DEBUG] Cloudflare API response status:", response.status);
-
     if (!response.ok) {
       const errorBody = await response.text();
-      console.error("[DEBUG] Cloudflare API error response:", errorBody);
+      console.error("TURN credentials: Cloudflare API error", response.status, errorBody);
       return Response.json(
-        { error: "Failed to fetch TURN credentials from Cloudflare", details: errorBody },
+        { error: "Failed to fetch TURN credentials from Cloudflare" },
         { status: 500 }
       );
     }
 
     const data = (await response.json()) as CloudflareRTCResponse;
-    console.log("[DEBUG] Cloudflare response data:", JSON.stringify(data));
 
-    if (!data.success || !data.result?.iceServers) {
-      console.error("[DEBUG] Invalid Cloudflare response structure");
+    if (!data.iceServers || !Array.isArray(data.iceServers)) {
+      console.error("TURN credentials: invalid Cloudflare response structure");
       return Response.json(
-        { error: "Invalid response from Cloudflare API", success: data.success, hasResult: !!data.result },
+        { error: "Invalid response from Cloudflare API" },
         { status: 500 }
       );
     }
 
-    const turnServer = data.result.iceServers.find(
+    const turnServer = data.iceServers.find(
       (server) => server.username && server.credential
     );
 
-    console.log("[DEBUG] Found TURN server:", !!turnServer);
-    if (turnServer) {
-      console.log("[DEBUG] TURN server URLs:", turnServer.urls);
-    }
-
     if (!turnServer || !turnServer.urls || turnServer.urls.length === 0) {
-      console.error("[DEBUG] No valid TURN server found");
+      console.error("TURN credentials: no usable TURN server in response");
       return Response.json(
         { error: "No TURN servers available" },
         { status: 500 }
@@ -100,7 +80,6 @@ export async function GET(): Promise<Response> {
       credential: turnServer.credential!,
     };
 
-    console.log("[DEBUG] Successfully returning TURN credentials");
     return Response.json(credentials, {
       status: 200,
       headers: {
@@ -108,12 +87,12 @@ export async function GET(): Promise<Response> {
       },
     });
   } catch (error) {
-    console.error("[DEBUG] TURN credentials error:", error instanceof Error ? error.message : "unknown");
-    if (error instanceof Error) {
-      console.error("[DEBUG] Error stack:", error.stack);
-    }
+    console.error(
+      "TURN credentials error:",
+      error instanceof Error ? error.message : "unknown"
+    );
     return Response.json(
-      { error: "Failed to fetch TURN credentials", details: error instanceof Error ? error.message : "unknown" },
+      { error: "Failed to fetch TURN credentials" },
       { status: 500 }
     );
   }
