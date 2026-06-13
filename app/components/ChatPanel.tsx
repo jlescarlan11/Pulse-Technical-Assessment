@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { peerColor } from "@/lib/peerColor";
+import { callSign } from "@/lib/callsign";
 
 export interface ChatMessage {
   id: number;
@@ -58,6 +59,9 @@ export default function ChatPanel({
 
   const accent =
     peerId !== undefined ? peerColor(peerId) : "var(--color-signal)";
+  // The peer's ephemeral call-sign (this-session signal label, not a name).
+  // Falls back to the neutral "Stranger" when there's no peer id yet.
+  const signLabel = peerId !== undefined ? callSign(peerId) : "Stranger";
 
   return (
     <div className="animate-slide-in glass absolute inset-y-0 right-0 z-30 flex w-full max-w-md flex-col border-0 border-l text-haze-50">
@@ -83,7 +87,9 @@ export default function ChatPanel({
             </svg>
           </span>
           <div>
-            <p className="font-semibold leading-tight tracking-tight">Stranger</p>
+            <p className="truncate font-semibold leading-tight tracking-tight">
+              {signLabel}
+            </p>
             <p className="flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-wider text-haze-400">
               <span
                 className={`inline-block h-1.5 w-1.5 rounded-full ${
@@ -110,12 +116,18 @@ export default function ChatPanel({
               <path d="M15 10.5l5-2.8v8.6l-5-2.8" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
             </svg>
           </button>
+          {/* Danger pair (Story 3 AC1): "End chat" is the GREATER end-action —
+              it ends the whole conversation. It deliberately reads as the
+              heavier sibling of VideoPanel's lesser "End video" (which only
+              drops the video and keeps the chat). Label is "End chat" rather
+              than the ambiguous "End"; the compact px-3.5/h-9 treatment keeps
+              it legible without a fixed width. */}
           <button
             onClick={onEnd}
             title="End conversation"
-            className="flex h-9 items-center gap-1.5 rounded-full bg-danger/15 px-3.5 text-sm font-medium text-danger-400 transition hover:bg-danger hover:text-white active:scale-95"
+            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full bg-danger/15 px-3.5 text-sm font-medium text-danger-400 transition hover:bg-danger hover:text-white active:scale-95"
           >
-            End
+            End chat
           </button>
         </div>
       </header>

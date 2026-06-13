@@ -5,6 +5,7 @@ import "mapbox-gl/dist/mapbox-gl.css";
 import type { Map as MapboxMap, Marker } from "mapbox-gl";
 import type { PeerDot } from "@/lib/types";
 import { peerColor } from "@/lib/peerColor";
+import { callSign } from "@/lib/callsign";
 
 // Empty string (never a placeholder token) when unset, so no Mapbox secret is
 // baked into the bundle and the graceful "set your token" fallback below renders
@@ -14,21 +15,6 @@ const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 // Once the coach hint has been seen this session we don't nag on every render
 // (route changes, peer churn, reconnects). Cleared when the tab closes.
 const COACH_SEEN_KEY = "pulse.coachSeen";
-
-// M2 — derive a STABLE 4-char code from a peer id. Index labels ("Signal N")
-// renumber under churn; this is tied to the specific peer and stays put for the
-// session. Deterministic FNV-1a hash → base36, padded/sliced to a 4-char code,
-// rendered in the mono "code" voice. The same id always yields the same code,
-// and it's the SR referent that pairs with the peerColor swatch.
-function peerCode(id: string): string {
-  let h = 0x811c9dc5;
-  for (let i = 0; i < id.length; i++) {
-    h ^= id.charCodeAt(i);
-    h = Math.imul(h, 0x01000193);
-  }
-  // Unsigned, base36, last 4 chars, uppercase. Left-pad so it's always 4 wide.
-  return (h >>> 0).toString(36).toUpperCase().padStart(4, "0").slice(-4);
-}
 
 export default function WorldMap({
   peers,
@@ -278,14 +264,14 @@ export default function WorldMap({
         dot.style.pointerEvents = reachable ? "auto" : "none";
         dot.disabled = !reachable;
         dot.title = peer.busy ? "In another conversation" : "Tap to connect";
-        // Pair the stable code with the action so the dot's accessible name
-        // matches the list row referent (M2).
-        const code = peerCode(peer.id);
+        // Pair the stable call-sign with the action so the dot's accessible
+        // name matches the list row referent (Phase 4 Story 1).
+        const sign = callSign(peer.id);
         dot.setAttribute(
           "aria-label",
           peer.busy
-            ? `Signal ${code}, currently busy`
-            : `Connect with signal ${code}`,
+            ? `${sign}, currently busy`
+            : `Connect with ${sign}`,
         );
       }
 
@@ -422,9 +408,9 @@ export default function WorldMap({
             <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto">
               {peers.map((peer) => {
                 const reachable = !peer.busy && canConnect;
-                // M2 — stable per-peer code (replaces volatile "Signal {i+1}")
-                // and the SR referent for the colour swatch.
-                const code = peerCode(peer.id);
+                // Phase 4 Story 1 — stable per-peer call-sign (replaces the
+                // 4-char code) and the SR referent for the colour swatch.
+                const sign = callSign(peer.id);
                 const status = peer.busy
                   ? "Busy"
                   : reachable
@@ -436,21 +422,23 @@ export default function WorldMap({
                       type="button"
                       disabled={!reachable}
                       onClick={() => reachable && connectTo(peer.id)}
-                      aria-label={`Signal ${code} — ${status}`}
+                      aria-label={`${sign} — ${status}`}
                       className="flex w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left transition-colors enabled:hover:bg-ink-700/60 disabled:cursor-not-allowed disabled:opacity-45"
                     >
-                      {/* M2 — the swatch is the peer's identity colour; give it
-                          an accessible name so SR users have the stable code as
-                          a referent, not just a (now removed) volatile number. */}
+                      {/* The swatch is the peer's identity colour; give it an
+                          accessible name so SR users have the stable call-sign
+                          as a referent, paired with the visible colour. */}
                       <span
                         className="h-3 w-3 shrink-0 rounded-full shadow-glow-sm"
                         style={{ background: peerColor(peer.id) }}
                       >
-                        <span className="sr-only">Signal {code}</span>
+                        <span className="sr-only">{sign}</span>
                       </span>
                       <span className="min-w-0 flex-1">
-                        <span className="block font-mono text-xs tracking-wide text-haze-100">
-                          {code}
+                        {/* Full two-word handle; truncate gracefully if the row
+                            is tight rather than redesigning the row. */}
+                        <span className="block truncate text-xs font-medium tracking-normal text-haze-100">
+                          {sign}
                         </span>
                         <span className="block font-mono text-[10px] uppercase tracking-[0.16em] text-haze-400">
                           {status}
