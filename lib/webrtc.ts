@@ -26,35 +26,43 @@ const ICE_CONFIG: RTCConfiguration = {
 };
 
 export async function buildICEConfig(): Promise<RTCConfiguration> {
+  console.log("[DEBUG] buildICEConfig: starting TURN credentials fetch");
   try {
     const response = await fetch("/api/turn-credentials", {
       method: "GET",
       signal: AbortSignal.timeout(5000),
     });
 
+    console.log(`[DEBUG] TURN fetch response status: ${response.status}`);
+
     if (!response.ok) {
       console.warn(`TURN fetch failed: HTTP ${response.status}`);
+      console.log("[DEBUG] falling back to STUN only");
       return ICE_CONFIG;
     }
 
     const data = (await response.json()) as TurnCredentialsResponse;
+    console.log("[DEBUG] TURN response data:", data);
 
     if (data.error) {
       console.warn(`TURN error: ${data.error}`);
+      console.log("[DEBUG] falling back to STUN only");
       return ICE_CONFIG;
     }
 
     if (!data.urls || !Array.isArray(data.urls) || data.urls.length === 0) {
       console.warn("TURN: missing or empty urls");
+      console.log("[DEBUG] falling back to STUN only");
       return ICE_CONFIG;
     }
 
     if (!data.username || !data.credential) {
       console.warn("TURN: missing username or credential");
+      console.log("[DEBUG] falling back to STUN only");
       return ICE_CONFIG;
     }
 
-    return {
+    const config = {
       iceServers: [
         { urls: "stun:stun.l.google.com:19302" },
         {
@@ -64,6 +72,8 @@ export async function buildICEConfig(): Promise<RTCConfiguration> {
         },
       ],
     };
+    console.log("[DEBUG] buildICEConfig: successfully configured STUN + TURN", config);
+    return config;
   } catch (error) {
     if (error instanceof Error) {
       if (error.name === "AbortError" || error.message.includes("aborted")) {
@@ -74,6 +84,7 @@ export async function buildICEConfig(): Promise<RTCConfiguration> {
     } else {
       console.warn("TURN fetch error: unknown");
     }
+    console.log("[DEBUG] buildICEConfig: falling back to STUN only");
     return ICE_CONFIG;
   }
 }
@@ -94,21 +105,28 @@ export class PeerSession {
     cb: PeerCallbacks,
     iceConfig: RTCConfiguration = ICE_CONFIG,
   ) {
+    console.log("[DEBUG] PeerSession constructor: initiator=", initiator, "iceServers count=", iceConfig.iceServers?.length);
     this.cb = cb;
     this.polite = !initiator;
     this.pc = new RTCPeerConnection(iceConfig);
+    console.log("[DEBUG] RTCPeerConnection created, connectionState=", this.pc.connectionState);
 
     this.pc.onicecandidate = ({ candidate }) => {
       if (candidate) {
+        console.log("[DEBUG] ICE candidate generated:", candidate.candidate?.substring(0, 80));
         this.cb.onSignal("ice", JSON.stringify(candidate));
+      } else {
+        console.log("[DEBUG] ICE candidate gathering completed (null candidate)");
       }
     };
 
     this.pc.onnegotiationneeded = async () => {
+      console.log("[DEBUG] onnegotiationneeded triggered");
       try {
         this.makingOffer = true;
         await this.pc.setLocalDescription();
         if (this.pc.localDescription) {
+          console.log("[DEBUG] sending", this.pc.localDescription.type, "offer");
           this.cb.onSignal("offer", JSON.stringify(this.pc.localDescription));
         }
       } finally {
@@ -117,11 +135,19 @@ export class PeerSession {
     };
 
     this.pc.ontrack = ({ streams }) => {
+      console.log("[DEBUG] ontrack: received remote stream");
       this.cb.onRemoteStream(streams[0] ?? null);
     };
 
     this.pc.onconnectionstatechange = () => {
-      this.cb.onConnectionState(this.pc.connectionState);
+      const newState = this.pc.connectionState;
+      console.log("[DEBUG] connectionState changed to:", newState);
+      console.log("[DEBUG] iceConnectionState:", this.pc.iceConnectionState, "signalingState:", this.pc.signalingState);
+      this.cb.onConnectionState(newState);
+    };
+
+    this.pc.onicegatheringstatechange = () => {
+      console.log("[DEBUG] iceGatheringState:", this.pc.iceGatheringState);
     };
 
     if (initiator) {
@@ -160,33 +186,58 @@ export class PeerSession {
   }
 
   async handleSignal(type: DescType, payload: string) {
-    if (this.closed) return;
+    if (this.closed) {
+      console.log("[DEBUG] handleSignal called but peer is closed, ignoring");
+      return;
+    }
+    console.log("[DEBUG] handleSignal:", type);
     const data = JSON.parse(payload);
 
     if (type === "ice") {
+      console.log("[DEBUG] handling ICE candidate, remoteDescription exists:", !!this.pc.remoteDescription);
       if (!this.pc.remoteDescription) {
         this.pendingCandidates.push(data);
+        console.log("[DEBUG] queued ICE candidate (pending candidates: " + this.pendingCandidates.length + ")");
         return;
       }
       try {
+        console.log("[DEBUG] adding ICE candidate");
         await this.pc.addIceCandidate(data);
-      } catch {}
+      } catch (e) {
+        console.log("[DEBUG] failed to add ICE candidate:", e instanceof Error ? e.message : "unknown error");
+      }
       return;
     }
 
     const desc = data as RTCSessionDescriptionInit;
+    console.log("[DEBUG] handling SDP", desc.type, "- signalingState: " + this.pc.signalingState + " makingOffer: " + this.makingOffer);
     const offerCollision =
       desc.type === "offer" &&
       (this.makingOffer || this.pc.signalingState !== "stable");
     this.ignoreOffer = !this.polite && offerCollision;
-    if (this.ignoreOffer) return;
+    if (this.ignoreOffer) {
+      console.log("[DEBUG] ignoring offer due to collision (polite=" + this.polite + ")");
+      return;
+    }
 
-    await this.pc.setRemoteDescription(desc);
+    try {
+      await this.pc.setRemoteDescription(desc);
+      console.log("[DEBUG] setRemoteDescription succeeded");
+    } catch (e) {
+      console.log("[DEBUG] setRemoteDescription failed:", e instanceof Error ? e.message : "unknown error");
+      return;
+    }
+
     await this.flushPendingCandidates();
     if (desc.type === "offer") {
-      await this.pc.setLocalDescription();
-      if (this.pc.localDescription) {
-        this.cb.onSignal("answer", JSON.stringify(this.pc.localDescription));
+      try {
+        await this.pc.setLocalDescription();
+        if (this.pc.localDescription) {
+          console.log("[DEBUG] sending answer");
+          this.cb.onSignal("answer", JSON.stringify(this.pc.localDescription));
+        }
+      } catch (e) {
+        console.log("[DEBUG] failed to create answer:", e instanceof Error ? e.message : "unknown error");
       }
     }
   }
