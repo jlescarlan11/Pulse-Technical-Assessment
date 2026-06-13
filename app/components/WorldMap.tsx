@@ -4,19 +4,12 @@ import { useEffect, useRef, useState } from "react";
 import "mapbox-gl/dist/mapbox-gl.css";
 import type { Map as MapboxMap, Marker } from "mapbox-gl";
 import type { PeerDot } from "@/lib/types";
+import { peerColor } from "@/lib/peerColor";
 
-// No fallback: the map only initialises when a real Mapbox token is provided
-// via env. When it's unset, the component renders a "set the token" card below
-// instead of leaking a placeholder/secret into the bundle.
-const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
-
-function dotColor(id: string): string {
-  let hash = 0;
-  for (let i = 0; i < id.length; i++) {
-    hash = (hash * 31 + id.charCodeAt(i)) | 0;
-  }
-  return `hsl(${Math.abs(hash) % 360}, 70%, 60%)`;
-}
+// Empty string (never a placeholder token) when unset, so no Mapbox secret is
+// baked into the bundle and the graceful "set your token" fallback below renders
+// instead of the map failing silently. (Phase 3 M1 + Phase 2 peerColor refactor.)
+const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 
 export default function WorldMap({
   peers,
@@ -95,9 +88,10 @@ export default function WorldMap({
         const el = document.createElement("div");
         el.className = "pulse-me";
         el.title = "You are here";
-        el.innerHTML = `<span class="pulse-me-label">Me</span>📍`;
-        // anchor "bottom" → the pin's tip sits on the exact coordinate.
-        meMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: "bottom" })
+        el.innerHTML = `<span class="pulse-me-label">You</span>`;
+        // The glowing dot + ring are drawn in CSS, so anchor "center" seats
+        // the marker exactly on the coordinate.
+        meMarkerRef.current = new mapboxgl.Marker({ element: el, anchor: "center" })
           .setLngLat([me.lng, me.lat])
           .addTo(map);
       } else {
@@ -128,8 +122,10 @@ export default function WorldMap({
         if (!marker) {
           const el = document.createElement("button");
           el.className = "pulse-dot";
-          el.style.background = dotColor(peer.id);
+          // The dot's core + sonar ring read this custom property (see globals.css).
+          el.style.setProperty("--dot", peerColor(peer.id));
           el.title = "Tap to connect";
+          el.setAttribute("aria-label", "Connect with a nearby stranger");
           el.addEventListener("click", (e) => {
             e.stopPropagation();
             if (canConnectRef.current) onPeerClickRef.current(peer.id);
@@ -139,7 +135,11 @@ export default function WorldMap({
             .addTo(map);
           markers.set(peer.id, marker);
         }
-        marker.getElement().style.opacity = peer.busy ? "0.35" : "1";
+        // Busy peers are dimmed and non-interactive so the hover/cursor
+        // affordance matches what a tap will actually do.
+        const dot = marker.getElement();
+        dot.style.opacity = peer.busy ? "0.4" : "1";
+        dot.style.pointerEvents = peer.busy ? "none" : "auto";
       }
 
       // Drop markers for peers that went offline / got filtered out.
@@ -158,21 +158,57 @@ export default function WorldMap({
 
   return (
     <div className="absolute inset-0">
-      <div ref={containerRef} className="h-full w-full bg-zinc-900" />
+      <div ref={containerRef} className="h-full w-full bg-ink-900" />
+
+      {/* Soft top + bottom scrims so the glass HUD always reads over the map */}
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 top-0 h-28 bg-gradient-to-b from-ink-950/70 to-transparent"
+      />
+      <div
+        aria-hidden
+        className="pointer-events-none absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-ink-950/70 to-transparent"
+      />
 
       {!TOKEN && (
         <div className="absolute inset-0 flex items-center justify-center p-6 text-center">
-          <p className="max-w-md rounded-lg bg-zinc-800 p-4 text-sm text-zinc-200">
+          <p className="glass max-w-md rounded-2xl p-5 text-sm text-haze-200">
             Set{" "}
-            <code className="text-emerald-400">NEXT_PUBLIC_MAPBOX_TOKEN</code> in{" "}
-            <code>.env</code> to load the map.
+            <code className="font-mono text-signal">NEXT_PUBLIC_MAPBOX_TOKEN</code>{" "}
+            in <code className="font-mono text-haze-100">.env</code> to load the
+            map.
           </p>
         </div>
       )}
 
-      {/* Online count */}
-      <div className="absolute bottom-4 left-4 rounded-full bg-zinc-900/80 px-3 py-1.5 text-xs text-zinc-300 backdrop-blur">
-        {peers.length} online
+      {/* Brand mark — top left */}
+      <div className="glass-faint absolute left-4 top-4 flex items-center gap-2.5 rounded-full py-2 pl-3 pr-4">
+        <span className="relative flex h-2 w-2">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
+          <span className="relative inline-flex h-2 w-2 rounded-full bg-signal shadow-glow-sm" />
+        </span>
+        <span className="text-sm font-semibold tracking-tight text-haze-50">
+          Pulse
+        </span>
+      </div>
+
+      {/* Live presence count — bottom left */}
+      <div className="glass-faint absolute bottom-4 left-4 flex items-center gap-2.5 rounded-full px-4 py-2">
+        <svg className="h-3.5 w-3.5 text-signal" viewBox="0 0 16 16" fill="none" aria-hidden>
+          <path
+            d="M1 8h3l1.5-4 3 8L12 6l1-2h1"
+            stroke="currentColor"
+            strokeWidth="1.4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span className="text-xs text-haze-200">
+          <span className="font-mono font-semibold tabular-nums text-haze-50">
+            {peers.length}
+          </span>{" "}
+          {peers.length === 1 ? "signal" : "signals"} nearby
+        </span>
       </div>
     </div>
   );
