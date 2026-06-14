@@ -238,7 +238,14 @@ export default function Home() {
   }, [actionNonce]);
 
   function addMessage(mine: boolean, text: string) {
-    setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
+    // createdAt is a CLIENT-ONLY wall-clock stamp (Date.now(), ms epoch) read
+    // solely by ChatPanel's Fade Trails decay. It is NOT sent over the wire,
+    // NOT persisted, and does NOT change a message's real lifetime — messages
+    // stay in-memory and are cleared on teardown.
+    setMessages((prev) => [
+      ...prev,
+      { id: msgId.current++, mine, text, createdAt: Date.now() },
+    ]);
   }
 
   // Token-aware signal sender. Pulls the current token from the ref, and on a

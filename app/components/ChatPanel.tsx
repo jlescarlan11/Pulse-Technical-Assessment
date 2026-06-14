@@ -9,6 +9,13 @@ export interface ChatMessage {
   id: number;
   mine: boolean;
   text: string;
+  /**
+   * Client-only wall-clock creation stamp (Date.now(), ms epoch), set in
+   * page.tsx#addMessage. Drives the Fade Trails visual decay below and nothing
+   * else — it is never sent over the wire, never persisted, and does not change
+   * a message's real (in-memory, teardown-cleared) lifetime.
+   */
+  createdAt: number;
 }
 
 // Throttle for outbound onTyping(true): once we've told the peer we're typing
@@ -23,6 +30,84 @@ const TYPING_IDLE_MS = 2500;
 // line isn't clipped for screen readers). The actual wait is whichever of this
 // and the real refill estimate is longer.
 const COOLDOWN_MIN_MS = 700;
+
+// ── Fade Trails (visual decay) ──
+// A message dims with AGE so the "nothing is kept" promise is FELT, not just
+// told. This is PURELY VISUAL: opacity only. The text node is never removed,
+// never aria-hidden, never display:none'd — the accessibility tree stays at
+// full fidelity at every stage, and the real (in-memory, teardown-cleared)
+// lifetime is untouched. Honesty guardrail: the floor is ABOVE zero, so the
+// fade can never imply a deletion that isn't happening — a dimmed line is still
+// plainly there, because it still is.
+//
+// Opacity falls monotonically from FULL to FLOOR over DECAY_MS as a function of
+// age = now − createdAt, then RESTS at FLOOR forever. A gentle ease-out shapes
+// the curve (calm, never abrupt); it stays monotonic so a message only ever
+// dims, never brightens.
+const DECAY_FULL_OPACITY = 1;
+const DECAY_FLOOR_OPACITY = 0.35;
+// S4 — PER-STYLE floor for INCOMING bubbles. Measured WCAG contrast: the "mine"
+// bubble is an OPAQUE signal fill (the map can't bleed through) so it stays
+// readable, but the incoming bubble (text-haze-100 #e1e7f5 on bg-ink-750/80
+// #121a30 at 80% over the translucent .glass panel) composited at the 0.35 floor
+// measures only ~2.7:1 — BELOW AA 4.5:1. Raising the incoming floor to 0.55
+// lifts the composited text to ~4.8–5.0:1 across the realistic backdrop range
+// (dark map → light label) while still reading as a clear, honest dim. Mine keeps
+// the deeper 0.35 floor since its contrast is intrinsic, not background-coupled.
+const DECAY_FLOOR_OPACITY_INCOMING = 0.55;
+const DECAY_MS = 90_000; // age at which a message reaches the resting floor
+// Shared-ticker cadence. ONE interval re-renders the whole list so every
+// bubble's opacity recomputes from its own age — we never run a timer/rAF per
+// message (the perf guardrail). ~1s is imperceptibly smooth for a 90s fade and
+// far cheaper than a 60fps rAF loop for a handful of static text nodes.
+const DECAY_TICK_MS = 1000;
+
+// Reduced-motion cadence. The stepped path only needs to catch ONE threshold
+// crossing (the midpoint, FULL→FLOOR), so we tick far more slowly than the
+// smooth path — just often enough that the single calm step lands promptly,
+// without a busy timer. Coarser cadence = fewer wakeups for the same result.
+const DECAY_REDUCED_TICK_MS = 5000;
+
+// Pure age→opacity mapping. Clamps age into [0, DECAY_MS], applies a gentle
+// ease-out (1 − (1−t)^2), and lerps FULL→FLOOR. At age 0 → FULL; at age ≥
+// DECAY_MS → FLOOR. No clock, no state — just math, so it's trivially testable
+// and identical on every render.
+function decayOpacity(ageMs: number, floor: number = DECAY_FLOOR_OPACITY): number {
+  const t = Math.min(Math.max(ageMs, 0), DECAY_MS) / DECAY_MS;
+  const eased = 1 - (1 - t) * (1 - t); // ease-out: quick-ish settle, calm tail
+  // S4 — the resting floor is per-style (incoming uses a higher AA-legible floor).
+  return DECAY_FULL_OPACITY - eased * (DECAY_FULL_OPACITY - floor);
+}
+
+// Reduced-motion STATIC step. Under prefers-reduced-motion we must NOT run a
+// continuous opacity loop, so each bubble renders a single, stable,
+// age-appropriate opacity: FULL while the line is recent, then one calm step to
+// the resting FLOOR once it has aged past the midpoint. This maps age to one of
+// only TWO values, so the shared ticker (which still runs, to advance `now`)
+// can at most produce a single instantaneous opacity step at the midpoint —
+// never a continuous/animated transition. That discrete one-time step is what
+// prefers-reduced-motion permits and is exactly what the spec asked for.
+const DECAY_REDUCED_STEP_MS = DECAY_MS / 2;
+function staticDecayOpacity(
+  ageMs: number,
+  floor: number = DECAY_FLOOR_OPACITY,
+): number {
+  // S4 — the single calm step lands on the per-style floor (incoming = higher).
+  return ageMs < DECAY_REDUCED_STEP_MS ? DECAY_FULL_OPACITY : floor;
+}
+
+// Live read of the OS/browser reduced-motion preference. JS-driven decay (the
+// shared ticker) is invisible to the globals.css reduced-motion block — that
+// only governs CSS animations/transitions — so we branch on it MANUALLY, the
+// same pattern WorldMap.tsx uses for its JS camera moves. Read at mount/effect
+// time; SSR-guarded for the (never, here) absent-matchMedia case.
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
 
 export default function ChatPanel({
   messages,
@@ -128,6 +213,42 @@ export default function ChatPanel({
       if (reenableTimer.current) clearTimeout(reenableTimer.current);
     };
   }, [stopTyping]);
+
+  // ── Fade Trails shared ticker ──
+  // A SINGLE interval (not one timer per message) bumps `now` so the message
+  // list re-renders and every bubble's opacity recomputes from its own age. We
+  // store `now` in state purely as a render driver — the opacities themselves
+  // are derived (decayOpacity), never stored.
+  //
+  // Reduced motion: we branch MANUALLY (the loop is JS, invisible to the
+  // globals.css reduced-motion block). The ticker still runs so `now` keeps
+  // advancing — `reduceMotion` selects only WHICH opacity fn render uses
+  // (stepped staticDecayOpacity vs smooth decayOpacity), not whether time
+  // advances. staticDecayOpacity returns one of only two values, so a running
+  // ticker can at most produce ONE instantaneous FULL→FLOOR step at the
+  // midpoint — a discrete state change, not an animation, which is exactly what
+  // prefers-reduced-motion permits. We do tick more slowly in that mode (one
+  // crossing to catch, not a smooth fade). `reduceMotion` is read once at mount
+  // via state initialiser so the render branch and the effect agree.
+  //
+  // Clock basis: wall-clock age (now − createdAt), so a message keeps aging
+  // even while the tab is hidden — we deliberately do NOT pause on
+  // visibilitychange (cheaper, and more honest: time really did pass).
+  //
+  // Lifecycle: the interval is cleared on unmount, mirroring the timer-cleanup
+  // discipline above — no ticker leak after teardown() unmounts the panel.
+  const [reduceMotion] = useState(prefersReducedMotion);
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    // Nothing aging to drive a repaint for? Skip the interval until there is.
+    if (messages.length === 0) return;
+    // Coarser cadence under reduced motion: one midpoint crossing to catch,
+    // not a continuous fade. Mode picks the cadence here and the opacity fn in
+    // render; it never decides whether `now` advances.
+    const tick = reduceMotion ? DECAY_REDUCED_TICK_MS : DECAY_TICK_MS;
+    const id = setInterval(() => setNow(Date.now()), tick);
+    return () => clearInterval(id);
+  }, [reduceMotion, messages.length]);
 
   function onDraftChange(next: string) {
     setDraft(next);
@@ -388,22 +509,58 @@ export default function ChatPanel({
               </p>
             </div>
           ))}
-        {messages.map((m) => (
-          <div
-            key={m.id}
-            className={`animate-msg-in flex ${m.mine ? "justify-end" : "justify-start"}`}
-          >
-            <span
-              className={`max-w-[80%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
-                m.mine
-                  ? "rounded-br-md bg-signal font-medium text-ink-950 shadow-glow-sm"
-                  : "hairline rounded-bl-md border bg-ink-750/80 text-haze-100"
-              }`}
+        {messages.map((m, i) => {
+          // Fade Trails: dim each bubble by AGE. Reduced motion gets a stable
+          // static step (no loop); otherwise the shared ticker's `now` drives a
+          // smooth fade toward the resting floor. Uniform for BOTH bubble
+          // styles (mine = signal-fill, incoming = hairline-ink); the floor
+          // (0.35) stays legible against the panel for both.
+          //
+          // The NEWEST message (last in the list) is pinned to FULL opacity so
+          // the active line of conversation is always the most legible,
+          // regardless of its computed age. Older lines are dimmer — and since
+          // decayOpacity is monotonic in age and the list is append-only in
+          // creation order, newest ≥ older holds.
+          //
+          // We set opacity via inline style (not a CSS transition) so it cannot
+          // fight the animate-msg-in entrance: the entrance plays on the wrapper
+          // div, the decay rides the inner span, and a fresh bubble starts at
+          // FULL (age ≈ 0) so the two never visibly contend.
+          const isNewest = i === messages.length - 1;
+          const ageMs = now - m.createdAt;
+          // S4 — incoming bubbles rest at a higher floor so their text stays AA-
+          // legible over the translucent panel; mine keeps the deeper 0.35 floor
+          // (its contrast is intrinsic to the opaque signal fill). Newest stays
+          // pinned to FULL and the reduced-motion stepped path is unchanged in
+          // shape — both just inherit the per-style floor.
+          const floor = m.mine
+            ? DECAY_FLOOR_OPACITY
+            : DECAY_FLOOR_OPACITY_INCOMING;
+          const opacity = isNewest
+            ? DECAY_FULL_OPACITY
+            : reduceMotion
+              ? staticDecayOpacity(ageMs, floor)
+              : decayOpacity(ageMs, floor);
+          return (
+            <div
+              key={m.id}
+              className={`animate-msg-in flex ${m.mine ? "justify-end" : "justify-start"}`}
             >
-              {m.text}
-            </span>
-          </div>
-        ))}
+              <span
+                // opacity only — the text stays in the DOM and the
+                // accessibility tree at full fidelity at every decay stage.
+                style={{ opacity }}
+                className={`max-w-[80%] rounded-2xl px-3.5 py-2 text-sm leading-relaxed ${
+                  m.mine
+                    ? "rounded-br-md bg-signal font-medium text-ink-950 shadow-glow-sm"
+                    : "hairline rounded-bl-md border bg-ink-750/80 text-haze-100"
+                }`}
+              >
+                {m.text}
+              </span>
+            </div>
+          );
+        })}
 
         {/* Incoming typing indicator — a transient peer "message" pinned to the
             bottom of the list. It has NO message id (it isn't a real message),
