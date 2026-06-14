@@ -237,15 +237,23 @@ export default function Home() {
     returnFocusToMain();
   }, [actionNonce]);
 
-  function addMessage(mine: boolean, text: string) {
+  function addMessage(mine: boolean, text: string): number {
     // createdAt is a CLIENT-ONLY wall-clock stamp (Date.now(), ms epoch) read
     // solely by ChatPanel's Fade Trails decay. It is NOT sent over the wire,
     // NOT persisted, and does NOT change a message's real lifetime — messages
     // stay in-memory and are cleared on teardown.
+    //
+    // Delivery Echo: allocate the id BEFORE the setMessages closure so we can
+    // return it. The outbound send rides this SAME id on the wire ({t:"msg",
+    // id}); the peer echoes it back in an ack and onDelivered flips this exact
+    // message to Delivered by id. id is monotonic & session-local, never sent
+    // for incoming-tagging purposes beyond this.
+    const id = msgId.current++;
     setMessages((prev) => [
       ...prev,
-      { id: msgId.current++, mine, text, createdAt: Date.now() },
+      { id, mine, text, createdAt: Date.now() },
     ]);
+    return id;
   }
 
   // Token-aware signal sender. Pulls the current token from the ref, and on a
@@ -339,6 +347,25 @@ export default function Home() {
             // A real message means they have stopped typing.
             setPeerTyping(false);
             addMessage(false, text);
+          },
+          onDelivered: (id) => {
+            // Delivery Echo (Story C): flip exactly the matching OUTBOUND
+            // message to delivered, matched BY ID (not array position). Pure
+            // functional update keyed on id makes it idempotent — a duplicate,
+            // stale, or foreign ack maps to an already-delivered or non-matching
+            // message and returns prev unchanged, so no re-render / re-animate.
+            // Order-independent: rapid-fire acks each land on their own id.
+            setMessages((prev) => {
+              let changed = false;
+              const next = prev.map((m) => {
+                if (m.id === id && m.mine && !m.delivered) {
+                  changed = true;
+                  return { ...m, delivered: true };
+                }
+                return m;
+              });
+              return changed ? next : prev;
+            });
           },
           onControl: (ctrl) => handleControl(ctrl),
           onTyping: (on) => setPeerTyping(on),
@@ -997,8 +1024,11 @@ export default function Home() {
           connected={conn.kind === "connected"}
           videoBusy={video !== "none"}
           onSend={(text) => {
-            peerRef.current?.sendChat(text);
-            addMessage(true, text);
+            // Delivery Echo: append locally first so we own the id, then send
+            // that SAME id on the wire. The peer's ack echoes it back and flips
+            // this message to Delivered (onDelivered, by id).
+            const id = addMessage(true, text);
+            peerRef.current?.sendChat(text, id);
           }}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}

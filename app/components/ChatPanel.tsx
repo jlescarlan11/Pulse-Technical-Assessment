@@ -16,6 +16,15 @@ export interface ChatMessage {
    * a message's real (in-memory, teardown-cleared) lifetime.
    */
   createdAt: number;
+  /**
+   * Delivery Echo: only meaningful for `mine: true` messages. Undefined/false =
+   * "Sent" (the CALM, COMPLETE resting default — not pending). Flipped to true
+   * by page.tsx#onDelivered ONLY when a real ack for this id arrives over the
+   * data channel. There is intentionally NO "undeliverable" state (cut), and
+   * NO timeout-to-delivered: an ack is the sole path to true. Honest meaning =
+   * "reached the peer's client", never "read"/"seen".
+   */
+  delivered?: boolean;
 }
 
 // Throttle for outbound onTyping(true): once we've told the peer we're typing
@@ -249,6 +258,26 @@ export default function ChatPanel({
     const id = setInterval(() => setNow(Date.now()), tick);
     return () => clearInterval(id);
   }, [reduceMotion, messages.length]);
+
+  // Delivery Echo (Story E): honest, POLITE screen-reader announcement when one
+  // of OUR messages becomes Delivered. We watch the count of delivered outbound
+  // messages; when it rises (an ack just landed) we set a short live-region
+  // string. Copy is strictly "Message delivered" — never "Read"/"Seen", and a
+  // message resting at Sent never announces (the count only rises on a real
+  // ack-driven delivered flip). Idempotent acks don't change the count, so they
+  // never re-announce. The region itself is the visually-hidden node below.
+  const deliveredCount = messages.reduce(
+    (n, m) => (m.mine && m.delivered ? n + 1 : n),
+    0,
+  );
+  const prevDeliveredCount = useRef(deliveredCount);
+  const [deliveryAnnounce, setDeliveryAnnounce] = useState("");
+  useEffect(() => {
+    if (deliveredCount > prevDeliveredCount.current) {
+      setDeliveryAnnounce("Message delivered");
+    }
+    prevDeliveredCount.current = deliveredCount;
+  }, [deliveredCount]);
 
   function onDraftChange(next: string) {
     setDraft(next);
@@ -567,6 +596,42 @@ export default function ChatPanel({
                 }`}
               >
                 {m.text}
+                {/* Delivery Echo (Story D): a QUIET resting indicator under our
+                    own messages. "Sent" is the calm, COMPLETE default — plain
+                    text, no spinner, no "pending", no warning colour. Delivered
+                    is an additive upgrade: a subtle check glyph + label, NOT the
+                    removal of an alarm. Sent vs Delivered is distinguished by
+                    ICON + TEXT, never colour alone (the app's AA discipline),
+                    both reading in muted ink against the opaque signal fill so
+                    they stay legible even when Fade Trails has dimmed the bubble
+                    (the indicator rides the same decayed span). No motion of its
+                    own — the swap is an instantaneous content change, which is
+                    reduced-motion-safe by construction. */}
+                {m.mine && (
+                <span className="mt-1 flex items-center justify-end gap-1 text-[0.625rem] leading-none text-ink-950/55">
+                  {m.delivered ? (
+                    <>
+                      <svg
+                        className="h-3 w-3"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        aria-hidden
+                      >
+                        <path
+                          d="m5 13 4 4L19 7"
+                          stroke="currentColor"
+                          strokeWidth="2.2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                        />
+                      </svg>
+                      <span>Delivered</span>
+                    </>
+                  ) : (
+                    <span>Sent</span>
+                  )}
+                </span>
+                )}
               </span>
             </div>
           );
@@ -613,6 +678,16 @@ export default function ChatPanel({
           </div>
         )}
       </div>
+
+      {/* Delivery Echo (Story E): dedicated visually-hidden POLITE live region
+          for the honest "Message delivered" announcement. Separate from the
+          existing status regions so a delivery ack never collides with the
+          connecting/cooldown/typing copy. aria-live=polite (not assertive)
+          waits for a pause and never steals focus; the node is sr-only so it's
+          screen-reader-only, matching the visual indicator on the bubble. */}
+      <p role="status" aria-live="polite" className="sr-only">
+        {deliveryAnnounce}
+      </p>
 
       {/* Composer */}
       <form onSubmit={submit} className="hairline border-t p-3">
