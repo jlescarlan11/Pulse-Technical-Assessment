@@ -379,7 +379,7 @@ export default function ChatPanel({
             </p>
           </div>
         </div>
-        <div className="flex gap-2">
+        <div className="flex items-center gap-2">
           <button
             onClick={onStartVideo}
             disabled={!connected || videoBusy}
@@ -391,32 +391,42 @@ export default function ChatPanel({
               <path d="M15 10.5l5-2.8v8.6l-5-2.8" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
             </svg>
           </button>
+          {/* Divider: sets the constructive control (video) apart from the
+              destructive pair, so the row parses as "talk more │ leave". */}
+          <span aria-hidden className="mx-0.5 h-5 w-px rounded-full bg-haze-200/15" />
           {/* Danger pair (Story 3 AC1 + Phase 4): two escalating, LABELED
-              actions. Both carry a visible word so the more deliberate control
-              never reads as less deliberate than the lighter one.
+              actions, both COOLED at rest so the header never reads as
+              aggressive while the conversation is healthy. Severity is still
+              encoded by WEIGHT — but the weight now reveals on hover/intent
+              rather than shouting by default. Both carry a visible word so the
+              more deliberate control never reads as less deliberate than the
+              lighter one.
 
-              "End chat" — the GREATER end-action: it ends the whole
-              conversation (heavier sibling of VideoPanel's "End video"). It is
-              the LIGHTER of this pair: a danger TINT (bg-danger/15) that only
-              fills on hover. Graceful — you might meet this peer again.
+              "End chat" — the GREATER end-action (ends the whole conversation,
+              heavier sibling of VideoPanel's "End video") yet the LIGHTER of
+              this pair. At rest it is NEUTRAL — a quiet hairline ghost, no red —
+              because ending a chat is graceful; you might meet this peer again.
+              Hover warms it to a danger TINT, the gentle "this ends things" cue.
 
-              "Block" — the MORE severe sibling. Severity is encoded by WEIGHT,
-              not by hiding the label: a solid danger FILL with a signal-danger
-              glow vs End chat's tint, plus a no-entry ring glyph (a
-              conventional "blocked" mark, not the old shield-off metaphor that
-              over-promised protection). Single-tap, no confirm modal — Undo
-              lives in the resulting toast and receives focus there. The
-              accessible name carries the peer call-sign; the title is a
-              redundant honesty enhancement, NOT the sole carrier (the toast's
-              "for this session" copy is the persistent, reachable reinforcement
-              of the session-scoped ceiling). :focus-visible inherits the global
-              signal ring; reduced-motion collapses the active-scale via
-              globals.css. whitespace-nowrap keeps both pills from wrapping when
-              all three controls share the header. */}
+              "Block" — the MORE severe sibling. It is the only control wearing
+              danger colour AT REST (a danger OUTLINE + the no-entry ring glyph,
+              a conventional "blocked" mark — not the old shield-off metaphor
+              that over-promised protection), so it always reads as the more
+              deliberate action even before you touch it. Hover fills it to a
+              solid danger PLATE with the signal-danger glow — its full weight,
+              revealed on intent. Single-tap, no confirm modal — Undo lives in
+              the resulting toast and receives focus there. The accessible name
+              carries the peer call-sign; the title is a redundant honesty
+              enhancement, NOT the sole carrier (the toast's "for this session"
+              copy is the persistent, reachable reinforcement of the
+              session-scoped ceiling). :focus-visible inherits the global signal
+              ring; reduced-motion collapses the active-scale via globals.css.
+              whitespace-nowrap keeps both pills from wrapping when all three
+              controls share the header. */}
           <button
             onClick={onEnd}
             title="End conversation"
-            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full bg-danger/15 px-3.5 text-sm font-medium text-danger-400 transition hover:bg-danger hover:text-white active:scale-95"
+            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full border border-haze-200/15 px-3.5 text-sm font-medium text-haze-200 transition hover:border-danger/30 hover:bg-danger/15 hover:text-danger-400 active:scale-95"
           >
             End chat
           </button>
@@ -424,7 +434,7 @@ export default function ChatPanel({
             onClick={onBlock}
             aria-label={`Block ${signLabel} for this session`}
             title={`Block ${signLabel} — they vanish from your map and can't reconnect this session. They reappear if they reload (new identity).`}
-            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full bg-danger px-3.5 text-sm font-semibold text-white shadow-[0_0_16px_-4px_var(--color-danger)] transition hover:bg-danger-600 active:scale-95"
+            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full border border-danger/40 bg-danger/5 px-3.5 text-sm font-semibold text-danger-400 transition hover:border-danger hover:bg-danger hover:text-white hover:shadow-[0_0_16px_-4px_var(--color-danger)] active:scale-95"
           >
             <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
               <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.8" />
