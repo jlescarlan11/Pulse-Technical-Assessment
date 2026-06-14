@@ -1278,3 +1278,61 @@ Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `
 - **Surface the controls' keyboard story** in a first-run hint, the way the map already coaches "tap a signal to say hello".
 
 **Phase 4 (continued) deliverable:** A map-controls cluster that makes the hero surface *navigable* without a pointer — zoom, recenter, and frame-all in the HUD's own dark glass — with the honesty held throughout: the zoom buttons help people move the map, they don't pretend to be a new way to *connect* (the keyboard-reachable nearby-signals list already is that). The non-obvious correctnesses — reduced motion at the JS-camera level, the antimeridian shortest-arc, and choosing `aria-disabled` over the native attribute so a keyboard user is never ejected when a control reaches its bound — are the parts that make it actually work for the people the feature is for.
+
+---
+
+# Phase 4: Fade Trails — Ephemerality You Can See
+
+**Status:** Shipped
+**Date:** 2026-06-14
+**Branch:** `feature/phase-4-felt-ephemerality`
+
+**Brief & thinking:** The app *tells* you "nothing is kept" — messages are P2P, in-memory, and gone the moment a call tears down. But that promise was a footnote, not a feeling. Fade Trails makes it sensory: each chat message visibly dims as it ages, so you watch a thought dissolve. The same ephemerality the architecture already guarantees, now *felt* rather than claimed.
+
+**What it is:** A chat message eases from full opacity toward a resting floor over its lifetime, then holds there. It is **purely visual** — opacity only. The text never leaves the DOM or the accessibility tree, the real (in-memory, teardown-cleared) message lifetime is unchanged, and nothing new crosses the wire. A client-only `createdAt` stamp is the only addition to the data.
+
+**How it works:**
+- **Decay model:** opacity is a pure function of `age = now − createdAt`, eased `1 − (1−t)²` over `DECAY_MS = 90s`, monotonic, then clamped at the floor. No clock baked into the value — it re-derives identically on every render.
+- **Per-style floor (the AA fix):** mine bubbles are an opaque signal fill and dim safely to `0.35`. Incoming bubbles are translucent text over the live map, so a shared `0.35` floor composited to ~2.7:1 — below WCAG AA. Incoming therefore floors at `0.55` (measured ~4.8:1, passing). The floor is chosen per bubble by `m.mine`.
+- **Newest pinned full:** the most recent message is held at full opacity regardless of age, so the active line of conversation is always the most legible; older lines trail off behind it.
+- **One shared ticker:** a single `setInterval` bumps a render clock so every bubble recomputes opacity from its own age — never one timer per message. It's skipped when the list is empty and cleared on unmount (no setState-after-teardown).
+- **Reduced motion:** under `prefers-reduced-motion`, a coarse ticker drives a single discrete full→floor *step* at the midpoint instead of a continuous fade — branched manually in JS, because the `globals.css` reduced-motion block can't govern a JS-driven opacity loop (the same reason the map controls handle it in camera logic).
+
+**Key decisions & honesty:** The floor is never zero and the text always stays in the accessibility tree, so the fade can never *imply* a deletion that isn't happening — a dimmed line is still plainly, readably there, because it still is. Wall-clock age means a message keeps dissolving even while the tab is hidden (time really did pass); we deliberately don't pause it. The visual decay is decoration over a truth the system already keeps, never a substitute for it.
+
+**Change summary:**
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `ChatPanel.tsx` — decay core | `decayOpacity(age, floor)` eased full→floor over `DECAY_MS`; `staticDecayOpacity` for reduced motion | Pure, testable, identical every render; the floor is a parameter so each bubble style picks its own |
+| `ChatPanel.tsx` — per-bubble opacity | Floor `0.35` (mine) / `0.55` (incoming); newest pinned full | Opaque fill can dim further than translucent-over-map text without failing AA; the active line stays brightest |
+| `ChatPanel.tsx` — shared ticker | One interval re-renders the list; reduced-motion uses a coarse tick + single step; cleared on unmount | One timer, not N; reduced motion gets a step, not a loop; no teardown leak |
+| `page.tsx` — `addMessage` | Stamp a client-only `createdAt: Date.now()` | The only data change; never sent, never stored, drives age alone |
+
+**Total:** Messages that dim with age to make "nothing is kept" a felt experience — opacity only, text always in the a11y tree, per-style AA-safe floors, newest pinned legible, one shared ticker, reduced-motion-correct. Frontend-only: **no API route, no schema change, no signaling change.** Tests **211 → 220 (+9 Fade Trails + 2 reduced-motion)**. `tsc` clean, lint clean. Full pipeline; UI/UX review caught the incoming-bubble contrast risk (raised to `0.55`) and a reduced-motion correctness bug (a frozen clock under `prefers-reduced-motion` that stopped any decay), both fixed before merge.
+**Risk:** Low — additive and visual; it changes how a message *looks* as it ages and nothing else. The text node, layout, auto-scroll, typing indicator, and real message lifetime are untouched.
+
+**What I'd do next (with more time):**
+- **Stop the idle ticker** once every visible non-newest message has reached the floor and no new message has arrived — nothing left to animate.
+- **Smooth the newest→aged handoff:** when a new message arrives, the previously-newest jumps from full to its true aged opacity in one frame; a brief transition (without fighting the entrance animation) would soften it.
+- **A whisper of decay on the composer** — a faint hint that an unsent draft is also impermanent — if it can be done without nagging.
+
+**Phase 4 (continued) deliverable:** Fade Trails turns the app's central promise into something you can watch happen. The discipline is that it's honest twice over — the floor never reaches zero and the text never leaves the accessibility tree, so the fade dramatizes an ephemerality the system genuinely keeps without ever faking one it doesn't. The non-obvious parts — the per-style AA floor, the single shared ticker, and the reduced-motion *step* instead of a loop — are what keep a pretty effect from quietly becoming an accessibility regression.
+
+---
+
+# Phase 4: Proximity Pulse — Explored, Then Held (a decision)
+
+**Status:** Built, reviewed, removed — held for a properly-scoped future pass
+**Date:** 2026-06-14
+**History:** added `1e65d4b`, removed `cf0926e` (branch `feature/phase-4-felt-ephemerality`)
+
+**What it was:** An ambient orb that would intensify as the nearest anonymous peer trended *closer* over a session — "turn location into a feeling, not data; someone's signal is getting stronger." It was built in full: a pure trend reducer (EMA smoothing + a hysteresis dead-band + a nearest-peer-swap reset so two different peers' distances are never compared), an ambient HUD orb with a visible trend label and a debounced screen-reader live region, reduced-motion handling, and **41 passing tests**. Every quality gate was green.
+
+**Why it was removed:** Code review and QA, independently, found the marquee behavior can *never fire in real use*. Two facts combine: `myLocation` is captured **once** at join (there's no `watchPosition`), and each peer's privacy offset is generated **once per session** (`lib/geo.ts`). So `distance(me, peer)` is **constant on every poll** — the smoothed trend is permanently "steady", and the only other transition (a nearest-peer swap) is deliberately forced to "neutral". The "growing stronger / fading" states existed *only* in synthetic tests that injected movement the app never produces. The 41 green tests were a signal in themselves: they passed without ever exercising a real approach.
+
+**Why not just fix it:** The honest repairs each cost more than they return right now.
+- *"Make it real"* (continuous geolocation so your own movement drives the signal) cuts against the app's privacy-minimal ethos — and the truest form, reacting to a *peer* moving, needs peers to periodically re-publish location, which is a presence/backend change deserving its own design cycle.
+- *"Presence-only"* (a static glow whose brightness is just the nearest peer's closeness) largely **duplicates what the map already shows** and barely changes given static per-session data.
+
+**The decision:** Hold Proximity Pulse rather than ship something inert or redundant. *Honest by design* has to apply to our own shipping bar — a feature whose headline behavior can't happen doesn't ship just because it compiles and tests green. The exploration stays in git history; when there's a location-republishing mechanism to build it on, it returns properly scoped. This mirrors the discipline behind the earlier rejected path: prefer one feature that genuinely works to two where one only looks like it does.
