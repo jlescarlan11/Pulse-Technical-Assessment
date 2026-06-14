@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { peerColor } from "@/lib/peerColor";
 import { callSign } from "@/lib/callsign";
+import { createChatBucket, type TokenBucket } from "@/lib/chatRate";
 
 export interface ChatMessage {
   id: number;
@@ -17,6 +18,11 @@ const TYPING_THROTTLE_MS = 1500;
 // Idle window: if no keystroke lands within this long, we tell the peer we've
 // stopped typing.
 const TYPING_IDLE_MS = 2500;
+// Minimum time the send cooldown stays visible once armed, so a near-instant
+// refill doesn't flash the notice as a perceived glitch (and the aria-live
+// line isn't clipped for screen readers). The actual wait is whichever of this
+// and the real refill estimate is longer.
+const COOLDOWN_MIN_MS = 700;
 
 export default function ChatPanel({
   messages,
@@ -25,6 +31,7 @@ export default function ChatPanel({
   onSend,
   onStartVideo,
   onEnd,
+  onBlock,
   peerId,
   peerTyping,
   onTyping,
@@ -35,6 +42,12 @@ export default function ChatPanel({
   onSend: (text: string) => void;
   onStartVideo: () => void;
   onEnd: () => void;
+  /**
+   * Refuse this peer for the rest of the session and return to the map.
+   * Single-tap (no confirm) — Undo lives in the resulting toast. Available
+   * whenever the panel is mounted (connecting OR connected), same as onEnd.
+   */
+  onBlock: () => void;
   peerId?: string;
   /** true while the stranger is composing a message. */
   peerTyping: boolean;
@@ -60,6 +73,18 @@ export default function ChatPanel({
   useEffect(() => {
     onTypingRef.current = onTyping;
   }, [onTyping]);
+
+  // Outbound chat send cooldown (UX honesty layer). We track our OWN send
+  // rate against the SAME shared limit the peer clamps inbound with
+  // (lib/chatRate.ts), so a compliant client never silently overruns a
+  // compliant peer. The bucket itself lives in a ref — spending a token must
+  // not re-render. Only the boolean `coolingDown` is state, and it flips just
+  // twice per burst (at-limit -> disabled, refill -> enabled), mirroring the
+  // ref-based typing throttle above. We do NOT queue messages: queueing would
+  // imply a persistence we don't have and would hide the at-limit state.
+  const sendBucket = useRef<TokenBucket | null>(null);
+  const reenableTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [coolingDown, setCoolingDown] = useState(false);
 
   // Keep the latest message in view by scrolling the list itself — never the
   // page — so the drawer can't shift the surrounding layout. The typing
@@ -98,7 +123,10 @@ export default function ChatPanel({
 
   // Clean up timers on unmount and tell the peer we're no longer typing.
   useEffect(() => {
-    return () => stopTyping();
+    return () => {
+      stopTyping();
+      if (reenableTimer.current) clearTimeout(reenableTimer.current);
+    };
   }, [stopTyping]);
 
   function onDraftChange(next: string) {
@@ -137,11 +165,47 @@ export default function ChatPanel({
   function submit(e: React.FormEvent) {
     e.preventDefault();
     const text = draft.trim();
-    if (!text || !connected) return;
+    if (!text || !connected || coolingDown) return;
+
+    // Spend a token against our own outbound budget before sending. Built
+    // lazily so a session that never sends pays nothing. If the bucket is
+    // empty we arm the cooldown and bail WITHOUT sending or clearing the
+    // draft, so the message isn't lost — the user simply waits a beat.
+    if (!sendBucket.current) sendBucket.current = createChatBucket();
+    if (!sendBucket.current.tryRemove()) {
+      armCooldown();
+      return;
+    }
+
     onSend(text);
     setDraft("");
     // The message is on its way — we're no longer "typing".
     stopTyping();
+
+    // If that send drained the last token, disable the composer until a
+    // token refills, then auto-re-enable. This keeps outbound capacity in
+    // lockstep with the peer's inbound clamp.
+    if (!sendBucket.current.hasCapacity()) armCooldown();
+  }
+
+  // Enter the cooldown and schedule the exact auto-re-enable. Idempotent: a
+  // second call just reschedules against the latest refill estimate.
+  function armCooldown() {
+    const bucket = sendBucket.current;
+    if (!bucket) return;
+    const refillWait = bucket.msUntilNext();
+    if (refillWait <= 0) {
+      setCoolingDown(false);
+      return;
+    }
+    // Hold the notice for a readable minimum even if a token refills sooner.
+    const wait = Math.max(refillWait, COOLDOWN_MIN_MS);
+    setCoolingDown(true);
+    if (reenableTimer.current) clearTimeout(reenableTimer.current);
+    reenableTimer.current = setTimeout(() => {
+      reenableTimer.current = null;
+      setCoolingDown(false);
+    }, wait);
   }
 
   const accent =
@@ -206,18 +270,51 @@ export default function ChatPanel({
               <path d="M15 10.5l5-2.8v8.6l-5-2.8" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
             </svg>
           </button>
-          {/* Danger pair (Story 3 AC1): "End chat" is the GREATER end-action —
-              it ends the whole conversation. It deliberately reads as the
-              heavier sibling of VideoPanel's lesser "End video" (which only
-              drops the video and keeps the chat). Label is "End chat" rather
-              than the ambiguous "End"; the compact px-3.5/h-9 treatment keeps
-              it legible without a fixed width. */}
+          {/* Danger pair (Story 3 AC1 + Phase 4): two escalating, LABELED
+              actions. Both carry a visible word so the more deliberate control
+              never reads as less deliberate than the lighter one.
+
+              "End chat" — the GREATER end-action: it ends the whole
+              conversation (heavier sibling of VideoPanel's "End video"). It is
+              the LIGHTER of this pair: a danger TINT (bg-danger/15) that only
+              fills on hover. Graceful — you might meet this peer again.
+
+              "Block" — the MORE severe sibling. Severity is encoded by WEIGHT,
+              not by hiding the label: a solid danger FILL with a signal-danger
+              glow vs End chat's tint, plus a no-entry ring glyph (a
+              conventional "blocked" mark, not the old shield-off metaphor that
+              over-promised protection). Single-tap, no confirm modal — Undo
+              lives in the resulting toast and receives focus there. The
+              accessible name carries the peer call-sign; the title is a
+              redundant honesty enhancement, NOT the sole carrier (the toast's
+              "for this session" copy is the persistent, reachable reinforcement
+              of the session-scoped ceiling). :focus-visible inherits the global
+              signal ring; reduced-motion collapses the active-scale via
+              globals.css. whitespace-nowrap keeps both pills from wrapping when
+              all three controls share the header. */}
           <button
             onClick={onEnd}
             title="End conversation"
             className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full bg-danger/15 px-3.5 text-sm font-medium text-danger-400 transition hover:bg-danger hover:text-white active:scale-95"
           >
             End chat
+          </button>
+          <button
+            onClick={onBlock}
+            aria-label={`Block ${signLabel} for this session`}
+            title={`Block ${signLabel} — they vanish from your map and can't reconnect this session. They reappear if they reload (new identity).`}
+            className="flex h-9 items-center gap-1.5 whitespace-nowrap rounded-full bg-danger px-3.5 text-sm font-semibold text-white shadow-[0_0_16px_-4px_var(--color-danger)] transition hover:bg-danger-600 active:scale-95"
+          >
+            <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <circle cx="12" cy="12" r="8.25" stroke="currentColor" strokeWidth="1.8" />
+              <path
+                d="M6.4 6.4l11.2 11.2"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                strokeLinecap="round"
+              />
+            </svg>
+            Block
           </button>
         </div>
       </header>
@@ -351,18 +448,44 @@ export default function ChatPanel({
       </div>
 
       {/* Composer */}
-      <form onSubmit={submit} className="hairline flex gap-2 border-t p-3">
+      <form onSubmit={submit} className="hairline border-t p-3">
+        {/* Cooldown notice (Story 2): when we've hit our own send budget only
+            SENDING pauses — the input stays live so you can keep composing your
+            next line and never lose focus mid-flow. We auto-re-enable as a token
+            refills. The voice is system-state ("catching up"), not a scolding
+            "slow down", to stay honest about what's happening: the channel is
+            recovering, the user isn't at fault. role=status + aria-live=polite
+            announces it without stealing focus; it fades in via animate-fade-up
+            (held steady under prefers-reduced-motion by globals.css). No status
+            dot — the connecting state owns the pulsing-haze-dot vocabulary, and
+            this is a *connected* state, so text alone carries the meaning. */}
+        {coolingDown && (
+          <p
+            role="status"
+            aria-live="polite"
+            className="animate-fade-up mb-2 px-1 text-xs text-haze-400"
+          >
+            Catching up — send resumes in a moment.
+          </p>
+        )}
+        <div className="flex gap-2">
+        {/* The input stays enabled during cooldown — only SEND is gated (the
+            submit guard + disabled button below). Disabling a focused input
+            would drop focus to <body> and never restore it, ejecting an
+            actively-typing user from the composer. Keeping it live lets them
+            keep drafting their next line while send briefly pauses. */}
         <input
           value={draft}
           onChange={(e) => onDraftChange(e.target.value)}
-          placeholder={connected ? "Send a signal…" : "Connecting…"}
+          placeholder={!connected ? "Connecting…" : "Send a signal…"}
           disabled={!connected}
+          aria-busy={coolingDown}
           className="flex-1 rounded-full border border-haze-200/10 bg-ink-900/70 px-4 py-2.5 text-sm text-haze-50 outline-none transition placeholder:text-haze-500 focus:border-signal/40 disabled:opacity-50"
         />
         <button
           type="submit"
-          disabled={!connected || !draft.trim()}
-          title="Send"
+          disabled={!connected || !draft.trim() || coolingDown}
+          title={coolingDown ? "Catching up — send resumes in a moment" : "Send"}
           className="flex h-11 w-11 items-center justify-center rounded-full bg-signal text-ink-950 shadow-glow-sm transition duration-300 ease-[var(--ease-spring)] hover:scale-105 hover:shadow-glow active:scale-90 disabled:scale-100 disabled:opacity-35 disabled:shadow-none"
         >
           <svg className="h-4 w-4 rotate-45" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -375,6 +498,7 @@ export default function ChatPanel({
             />
           </svg>
         </button>
+        </div>
       </form>
     </div>
   );

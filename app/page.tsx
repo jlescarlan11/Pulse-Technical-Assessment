@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import EntryGate from "./components/EntryGate";
 import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
@@ -10,6 +10,8 @@ import { join, leave, poll, sendSignal, UnauthorizedError } from "@/lib/api";
 import { PeerSession, buildICEConfig, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
+import { callSign } from "@/lib/callsign";
+import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
 
 type Conn =
   | { kind: "idle" }
@@ -21,6 +23,12 @@ type Conn =
 type VideoState = "none" | "requesting" | "incoming" | "active";
 
 const REQUEST_TIMEOUT_MS = 30_000;
+
+// Auto-dismiss windows for the transient confirmation toast (showNotice).
+// A plain toast clears at NOTICE_MS; one carrying an action (e.g. Block's Undo)
+// gets NOTICE_ACTION_MS — a longer, calmer window to reach the control.
+const NOTICE_MS = 3500;
+const NOTICE_ACTION_MS = 6000;
 
 // ── Reciprocal Video (mutual-presence) tuning ──
 const AWAY_DEBOUNCE_MS = 500; // tab must stay hidden this long before cutting
@@ -38,7 +46,39 @@ export default function Home() {
   const tokenRef = useRef<string | null>(null);
   const [peers, setPeers] = useState<PeerDot[]>([]);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
-  const [notice, setNotice] = useState<string | null>(null);
+  // Transient confirmation toast. Most callers pass plain text; the Block flow
+  // attaches an optional `action` (label + handler) so the same single-slot
+  // toast can carry an Undo affordance without a second toast system. A nonce
+  // re-arms the auto-dismiss timer for the latest notice and lets the action
+  // path use a longer window (see showNotice).
+  //
+  // A11y (M1): the toast lives in a PERSISTENT live region (always-mounted
+  // container; only its inner content swaps), so an announcement fires on each
+  // empty→full content change rather than racing the region's own mount. The
+  // optional `assertive` flag promotes the announcement to assertive/role=alert
+  // for the result of a destructive action (Block/Undo) while routine notices
+  // (e.g. "Video declined") stay polite.
+  type NoticeAction = { label: string; onAct: () => void };
+  type Notice = {
+    text: string;
+    action?: NoticeAction;
+    assertive?: boolean;
+    nonce: number;
+  };
+  const [notice, setNotice] = useState<Notice | null>(null);
+  const noticeNonce = useRef(0);
+  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // M1 focus management for the Block→Undo safety net. After blockPeer(),
+  // teardown() unmounts ChatPanel and the focused Block button is destroyed,
+  // so focus would fall to <body> and the keyboard/SR user would have to
+  // blind-tab to find Undo within the 6s window. Instead we move focus to the
+  // Undo button when an action notice mounts (undoRef), and return focus to the
+  // map/main region (mainRef) on dismiss/timeout/after-Undo so it never rests
+  // on a removed node. A ref-flag tracks whether WE moved focus, so we only
+  // pull it back when we were the ones who placed it.
+  const undoRef = useRef<HTMLButtonElement | null>(null);
+  const mainRef = useRef<HTMLElement | null>(null);
+  const movedFocusForNotice = useRef(false);
   // Terminal (unrecoverable) notice — distinct from the transient confirmation
   // toast: it persists until the user acts (Reload) rather than auto-dismissing.
   // Kept separate so showNotice()'s 3.5s path stays untouched.
@@ -92,6 +132,16 @@ export default function Home() {
 
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
+  // Phase 4 "Block & Next" — an EPHEMERAL, in-memory blocklist of peer ids the
+  // user has refused. Held in a ref ON PURPOSE: it is read synchronously inside
+  // the poll tick (to filter discovery) and inside processSignal (to auto-decline
+  // inbound requests), and it must NOT survive the tab. No state, no localStorage,
+  // no DB — a peer is identified by a per-page-load UUID, so this list dies with
+  // the session and a reloaded peer gets a fresh identity. That ceiling is stated
+  // honestly in the UI copy (see the Block button title + the toast). The two
+  // decisions over this set (discovery filter + auto-decline) live as pure
+  // helpers in lib/blocklist.ts so they're unit-testable without the page.
+  const blockedRef = useRef<Set<string>>(new Set());
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Auto-dismiss timer for an INCOMING prompt the receiver never answers. The
   // requester gives up after REQUEST_TIMEOUT_MS and tears down its peer; without
@@ -118,10 +168,74 @@ export default function Home() {
     }
   }
 
-  function showNotice(text: string) {
-    setNotice(text);
-    window.setTimeout(() => setNotice(null), 3500);
+  // Show a transient toast. Pass an `action` to attach a single inline button
+  // (e.g. Undo) and `assertive` to promote the announcement for a destructive
+  // result. Re-arms a single shared timer so a newer notice always wins and an
+  // older one can't dismiss it early. Acting on (or being replaced) clears it.
+  // Wrapped in useCallback so it's a stable reference: it's read inside the
+  // incoming-prompt-expiry effect ([conn]) and we don't want that effect to
+  // re-subscribe on every render. It closes only over stable refs + setNotice,
+  // so an empty dep list is correct.
+  const showNotice = useCallback(
+    (
+      text: string,
+      opts?: { action?: NoticeAction; assertive?: boolean },
+    ) => {
+      const action = opts?.action;
+      const assertive = opts?.assertive;
+      const nonce = ++noticeNonce.current;
+      if (noticeTimer.current) clearTimeout(noticeTimer.current);
+      setNotice({ text, action, assertive, nonce });
+      noticeTimer.current = setTimeout(
+        () => {
+          // Only clear if no newer notice has superseded this one.
+          if (noticeNonce.current === nonce) setNotice(null);
+        },
+        action ? NOTICE_ACTION_MS : NOTICE_MS,
+      );
+    },
+    [],
+  );
+
+  // Return focus to the main/map region — but ONLY if we were the ones who
+  // moved it onto the toast (so we never yank focus from wherever the user
+  // legitimately put it). Used on dismiss, timeout, and after Undo fires.
+  function returnFocusToMain() {
+    if (movedFocusForNotice.current) {
+      movedFocusForNotice.current = false;
+      mainRef.current?.focus();
+    }
   }
+
+  function dismissNotice() {
+    if (noticeTimer.current) clearTimeout(noticeTimer.current);
+    returnFocusToMain();
+    setNotice(null);
+  }
+
+  // M1 — when an ACTION notice (the Block→Undo toast) mounts, move focus onto
+  // its Undo button so the 6s window is reachable without a blind tab from
+  // <body> (ChatPanel having just unmounted). The persistent live region still
+  // announces the text; this only places focus. Non-action notices don't grab
+  // focus. When the notice clears, return focus to main if we placed it there.
+  //
+  // Keyed on the action notice's NONCE, not merely "has an action": if a second
+  // action toast supersedes a first within the window, hasAction would stay true
+  // and the effect would NOT re-run, leaving focus stranded on the prior (now
+  // removed) Undo button. The nonce changes per notice, so each new action toast
+  // re-runs the focus move onto ITS button. `null` while there's no action.
+  const actionNonce = notice?.action ? notice.nonce : null;
+  useEffect(() => {
+    if (actionNonce !== null) {
+      movedFocusForNotice.current = true;
+      // rAF so the button is laid out before we focus it.
+      const id = requestAnimationFrame(() => undoRef.current?.focus());
+      return () => cancelAnimationFrame(id);
+    }
+    // The action notice went away (timeout/replacement) without going through
+    // dismissNotice — return focus to main if it was ours to return.
+    returnFocusToMain();
+  }, [actionNonce]);
 
   function addMessage(mine: boolean, text: string) {
     setMessages((prev) => [...prev, { id: msgId.current++, mine, text }]);
@@ -336,6 +450,41 @@ export default function Home() {
     teardown();
   }
 
+  // Phase 4 — refuse the current peer for the rest of this session, then return
+  // to the map. Mirrors endConnection: record + teardown happen UNCONDITIONALLY,
+  // independent of whether the network emit lands (a refusal must never hinge on
+  // the wire). We:
+  //   1. capture the peer id (teardown is about to clear conn),
+  //   2. add it to the in-memory blocklist (discovery filter + auto-decline read
+  //      this synchronously),
+  //   3. emit a graceful "end" so a well-behaved peer just sees a normal hang-up
+  //      — NO "you are blocked" is ever leaked,
+  //   4. teardown() to unmount ChatPanel and land back on the WorldMap,
+  //   5. surface an honest, session-scoped toast WITH an Undo affordance. It's
+  //      assertive (result of a destructive action) and focus moves to Undo so
+  //      the 6s safety net is reachable for keyboard/SR users (M1).
+  function blockPeer() {
+    const c = connRef.current;
+    if (c.kind !== "connecting" && c.kind !== "connected") return;
+    const peerId = c.peerId;
+    blockedRef.current.add(peerId);
+    void emitSignal(peerId, "end");
+    teardown();
+    const sign = callSign(peerId);
+    showNotice(`Blocked ${sign} for this session`, {
+      assertive: true,
+      action: {
+        label: "Undo",
+        // Un-block ONLY — removing the id lets them reappear in discovery and
+        // request again. It deliberately does NOT reconnect.
+        onAct: () => {
+          blockedRef.current.delete(peerId);
+          showNotice(`Unblocked ${sign}`);
+        },
+      },
+    });
+  }
+
   function startVideoRequest() {
     if (videoRef.current !== "none" || !peerRef.current) return;
     setVideo("requesting");
@@ -376,6 +525,15 @@ export default function Home() {
   function processSignal(sig: SignalMsg) {
     switch (sig.type) {
       case "request": {
+        // Phase 4 — a request from a blocked peer is silently auto-declined and
+        // NO prompt is shown. We emit the SAME "decline" a busy/ignored request
+        // produces, so it is indistinguishable from a normal decline — no
+        // "you are blocked" signal is ever leaked to the peer. Checked first so
+        // we never fall through to the busy path and double-emit decline.
+        if (isBlockedRequest(sig.fromId, blockedRef.current)) {
+          void emitSignal(sig.fromId, "decline");
+          break;
+        }
         if (connRef.current.kind === "idle") {
           setConn({ kind: "incoming", peerId: sig.fromId });
         } else {
@@ -458,7 +616,8 @@ export default function Home() {
         incomingTimer.current = null;
       }
     };
-  }, [conn]);
+    // showNotice is a stable useCallback, so listing it here is churn-free.
+  }, [conn, showNotice]);
 
   // applyVideoGate is recreated each render; read it through a ref inside the
   // heartbeat interval and the data-channel control handler so effect deps stay
@@ -520,7 +679,9 @@ export default function Home() {
         const data = await poll(sessionId, token);
         if (!active) return;
         authFailures = 0; // a clean poll clears the backoff
-        setPeers(data.peers);
+        // Phase 4 — exclude blocked peers from discovery entirely (map dots, the
+        // accessible "Nearby signals" list, and the count all derive from this).
+        setPeers(filterBlockedPeers(data.peers, blockedRef.current));
         for (const s of data.signals) processSignalRef.current(s);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -661,7 +822,9 @@ export default function Home() {
   const activePeerId = conn.kind !== "idle" ? conn.peerId : undefined;
 
   return (
-    <main className="fixed inset-0 overflow-hidden">
+    // tabIndex=-1 + ref so focus can be returned here (not <body>) after the
+    // Block→Undo toast is dismissed/timed-out — see returnFocusToMain (M1).
+    <main ref={mainRef} tabIndex={-1} className="fixed inset-0 overflow-hidden outline-none">
       <WorldMap
         peers={peers}
         me={myLocation}
@@ -711,16 +874,82 @@ export default function Home() {
         </div>
       )}
 
-      {/* Transient confirmation toast. Suppressed while a terminalNotice is up:
-          both ride z-50 on the same top-6 slot, so the persistent terminal
-          notice takes precedence and the transient one never overlaps it. */}
-      {notice && !terminalNotice && (
-        <div
-          role="status"
-          className="animate-pill-in glass-faint absolute left-1/2 top-6 z-50 -translate-x-1/2 rounded-full px-4 py-2.5 text-sm text-haze-100"
-        >
-          {notice}
-        </div>
+      {/* Transient confirmation toast — PERSISTENT live region (M1).
+          The role=status container is ALWAYS mounted (suppressed only while a
+          terminalNotice owns the slot); only its inner content swaps. A live
+          region that is injected together with its text often fails to announce,
+          so keeping the region resident and changing it empty→full makes the
+          announcement fire reliably for SR users.
+
+          Politeness varies per-notice: a destructive RESULT (Block/Undo) sets
+          notice.assertive, which promotes the region to role=alert +
+          aria-live=assertive so it interrupts; routine notices (e.g. "Video
+          declined") stay role=status + aria-live=polite. We always render BOTH
+          the polite and the assertive region so a content swap inside the right
+          one is what fires — toggling a single region's politeness on the same
+          node is unreliable.
+
+          Focus: when an ACTION notice mounts, focus moves to its Undo button so
+          the 6s safety net is reachable without a blind tab from <body> (see the
+          hasAction effect); dismissing/timeout returns focus to <main>. */}
+      {!terminalNotice && (
+        <>
+          {/* Polite region — always resident; carries non-assertive notices. */}
+          <div
+            role="status"
+            aria-live="polite"
+            aria-atomic="true"
+            className="sr-only"
+          >
+            {notice && !notice.assertive ? notice.text : ""}
+          </div>
+          {/* Assertive region — always resident; carries destructive results. */}
+          <div
+            role="alert"
+            aria-live="assertive"
+            aria-atomic="true"
+            className="sr-only"
+          >
+            {notice && notice.assertive ? notice.text : ""}
+          </div>
+
+          {/* The VISIBLE toast. The announcement comes from the resident live
+              regions above; to avoid the SAME text appearing twice in the a11y
+              tree we hide only the redundant text SPAN below — NOT the whole
+              toast. Hiding the whole toast would also hide the Undo button we
+              move focus to, stranding focus in an aria-hidden subtree (ghost
+              focus). So the wrapper stays exposed and the Undo button remains a
+              real, focusable, announced control. Mounted only when there is a
+              notice to show. */}
+          {notice && (
+            <div
+              className="animate-pill-in glass-faint absolute left-1/2 top-6 z-50 flex max-w-[calc(100vw-2rem)] -translate-x-1/2 items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm text-haze-100"
+            >
+              {/* Visual-only: the resident live region already announces this. */}
+              <span aria-hidden="true" className="leading-snug">
+                {notice.text}
+              </span>
+              {notice.action && (
+                <button
+                  ref={undoRef}
+                  type="button"
+                  // The surrounding text span is aria-hidden, so the button
+                  // carries its own self-contained name (action + context) for
+                  // when focus is moved here on the Block→Undo path.
+                  aria-label={`${notice.action.label} — ${notice.text}`}
+                  onClick={() => {
+                    const act = notice.action!.onAct;
+                    dismissNotice();
+                    act();
+                  }}
+                  className="shrink-0 rounded-full bg-signal px-3.5 py-1 text-xs font-bold text-ink-950 shadow-glow-sm transition hover:bg-signal-400 active:scale-95"
+                >
+                  {notice.action.label}
+                </button>
+              )}
+            </div>
+          )}
+        </>
       )}
 
       {conn.kind === "requesting" && (
@@ -766,6 +995,7 @@ export default function Home() {
           }}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
+          onBlock={blockPeer}
           peerId={activePeerId}
           peerTyping={peerTyping}
           onTyping={(on: boolean) => peerRef.current?.sendTyping(on)}
