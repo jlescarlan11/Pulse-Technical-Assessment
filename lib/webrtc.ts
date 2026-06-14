@@ -1,3 +1,5 @@
+import { TokenBucket, createInboundChatBucket } from "@/lib/chatRate";
+
 export type DescType = "offer" | "answer" | "ice";
 export type PeerControl =
   | "video-request"
@@ -122,6 +124,11 @@ export class PeerSession {
   private closed = false;
   private readonly cb: PeerCallbacks;
   private pendingCandidates: RTCIceCandidateInit[] = [];
+  // Per-session INBOUND chat flood clamp (render protection, NOT security;
+  // see lib/chatRate.ts). A token bucket spent ONLY by incoming chat
+  // (t:"msg") frames; ctrl/typing frames never touch it. Built lazily so
+  // sessions that never receive chat pay nothing.
+  private chatFloodClamp: TokenBucket | null = null;
 
   constructor(
     initiator: boolean,
@@ -185,7 +192,23 @@ export class PeerSession {
       try {
         const msg = JSON.parse(e.data as string);
         if (msg.t === "msg" && typeof msg.text === "string") {
-          this.cb.onChat(msg.text);
+          // Type-aware flood clamp: ONLY chat (t:"msg") is rate-limited.
+          // Excess chat is dropped silently (onChat simply isn't called) so
+          // a runaway sender can't flood the render path. ctrl frames
+          // (presence heartbeats + reciprocal-video signalling) and typing
+          // frames are dispatched below WITHOUT touching this bucket, so the
+          // presence shield can never be starved by chat volume. Unknown
+          // future msg.t values also bypass it (forward-compatible).
+          //
+          // The inbound clamp runs strictly MORE permissive than the sender's
+          // own outbound cooldown (createInboundChatBucket adds a small grace),
+          // so clock skew between the two peers can never silently drop a
+          // message a compliant sender believed was within the limit.
+          if (!this.chatFloodClamp)
+            this.chatFloodClamp = createInboundChatBucket();
+          if (this.chatFloodClamp.tryRemove()) {
+            this.cb.onChat(msg.text);
+          }
         } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
           this.cb.onControl(msg.ctrl as PeerControl);
         } else if (msg.t === "typing" && typeof msg.on === "boolean") {

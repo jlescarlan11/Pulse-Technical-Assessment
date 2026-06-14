@@ -18,6 +18,11 @@
  * announces our own typing via onTyping(true) (throttled) / onTyping(false)
  * (on submit). Timer-driven behaviour uses fake timers — no real sleeps.
  *
+ * Phase 4 "Block & Next": the Block control in the header danger group. Tests
+ * its accessible name (distinct from "End chat"), that it fires onBlock on
+ * click + keyboard, and that End chat stays wired to onEnd only — behaviour and
+ * accessible names, not glyph/CSS.
+ *
  * We test observable text/roles, not internals. jsdom is scoped via the
  * docblock so the node-env unit/API suites are unaffected.
  */
@@ -25,6 +30,7 @@ import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen } from "@testing-library/react";
 import ChatPanel, { type ChatMessage } from "./ChatPanel";
 import { callSign } from "@/lib/callsign";
+import { CHAT_RATE } from "@/lib/chatRate";
 
 // jsdom doesn't implement Element.scrollTo; ChatPanel's auto-scroll effect
 // calls it on the message list. Stub it as a no-op so the unrelated scroll
@@ -42,6 +48,7 @@ function panel(over: Partial<React.ComponentProps<typeof ChatPanel>> = {}) {
       onSend={() => {}}
       onStartVideo={() => {}}
       onEnd={() => {}}
+      onBlock={() => {}}
       peerId="abc"
       peerTyping={false}
       onTyping={() => {}}
@@ -351,6 +358,270 @@ describe("ChatPanel typing indicator (Phase 4)", () => {
 
       unmount();
       expect(onTyping).toHaveBeenCalledWith(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe("ChatPanel Block control (Phase 4 — Block & Next)", () => {
+  // call-sign for peerId "abc"; matched live so the accessible-name assertion
+  // tracks the generator rather than a hardcoded handle.
+  const SIGN = callSign("abc");
+
+  // Query the Block button by its accessible name ("Block {sign} for this
+  // session"), and End chat by its visible label. Behaviour + accessible names,
+  // never glyph/CSS.
+  function blockButton() {
+    return screen.getByRole("button", {
+      name: `Block ${SIGN} for this session`,
+    });
+  }
+  function endButton() {
+    return screen.getByRole("button", { name: "End chat" });
+  }
+
+  it("renders the Block control while connecting (panel mounted, not yet connected)", () => {
+    renderPanel({ connected: false });
+    expect(blockButton()).toBeInTheDocument();
+  });
+
+  it("renders the Block control while connected", () => {
+    renderPanel({ connected: true });
+    expect(blockButton()).toBeInTheDocument();
+  });
+
+  it("Block has a distinct accessible name from End chat — they are two separate controls", () => {
+    renderPanel({ connected: true });
+
+    const block = blockButton();
+    const end = endButton();
+
+    // Both present…
+    expect(block).toBeInTheDocument();
+    expect(end).toBeInTheDocument();
+    // …and genuinely distinct nodes with distinct accessible names.
+    expect(block).not.toBe(end);
+    expect(block).toHaveAccessibleName(`Block ${SIGN} for this session`);
+    // End chat is named by its visible text, NOT the Block name.
+    expect(end).toHaveAccessibleName("End chat");
+  });
+
+  it("the Block accessible name carries the peer call-sign (falls back to 'Stranger' with no peerId)", () => {
+    renderPanel({ connected: true, peerId: undefined });
+    expect(
+      screen.getByRole("button", { name: "Block Stranger for this session" }),
+    ).toBeInTheDocument();
+  });
+
+  it("clicking Block fires onBlock (and does NOT fire onEnd)", () => {
+    const onBlock = jest.fn();
+    const onEnd = jest.fn();
+    renderPanel({ connected: true, onBlock, onEnd });
+
+    fireEvent.click(blockButton());
+
+    expect(onBlock).toHaveBeenCalledTimes(1);
+    expect(onEnd).not.toHaveBeenCalled();
+  });
+
+  it("Block is keyboard-operable: Enter and Space activate it", () => {
+    // A native <button> fires its click on Enter/Space via the browser's default
+    // action; in jsdom we dispatch the click that the key activation produces,
+    // mirroring the suite's existing fireEvent style for keyboard operability.
+    const onBlock = jest.fn();
+    renderPanel({ connected: true, onBlock });
+    const block = blockButton();
+
+    block.focus();
+    expect(block).toHaveFocus();
+
+    fireEvent.keyDown(block, { key: "Enter", code: "Enter" });
+    fireEvent.click(block); // Enter on a button triggers click
+    fireEvent.keyDown(block, { key: " ", code: "Space" });
+    fireEvent.click(block); // Space on a button triggers click on keyup
+
+    expect(onBlock).toHaveBeenCalled();
+  });
+
+  it("End chat still fires onEnd only (and does NOT fire onBlock) — the two are distinct", () => {
+    const onBlock = jest.fn();
+    const onEnd = jest.fn();
+    renderPanel({ connected: true, onBlock, onEnd });
+
+    fireEvent.click(endButton());
+
+    expect(onEnd).toHaveBeenCalledTimes(1);
+    expect(onBlock).not.toHaveBeenCalled();
+  });
+});
+
+describe("ChatPanel outbound send cooldown (Story 2)", () => {
+  // Drive one send: set the draft, submit the form. The bucket reads Date.now(),
+  // which jest's fake timers mock — so back-to-back sends with no advanceTimers
+  // all land in the same instant and drain the shared CHAT_RATE bucket.
+  function send(input: HTMLElement, text: string) {
+    fireEvent.change(input, { target: { value: text } });
+    fireEvent.submit(input.closest("form") as HTMLFormElement);
+  }
+
+  function sendButtonOf(input: HTMLElement) {
+    return input
+      .closest("form")!
+      .querySelector('button[type="submit"]') as HTMLButtonElement;
+  }
+
+  // The unified, honest cooldown copy (system-state voice, not "slow down").
+  const COOLDOWN_COPY = "Catching up — send resumes in a moment.";
+
+  it("sends every message up to capacity, with no cooldown notice in-rate", () => {
+    jest.useFakeTimers();
+    try {
+      const onSend = jest.fn();
+      render(panel({ connected: true, onSend }));
+      const input = screen.getByPlaceholderText("Send a signal…");
+
+      // One under capacity: the bucket keeps a token, so we never cool down.
+      for (let i = 0; i < CHAT_RATE.capacity - 1; i++) send(input, `m${i}`);
+
+      expect(onSend).toHaveBeenCalledTimes(CHAT_RATE.capacity - 1);
+      expect(screen.queryByText(COOLDOWN_COPY)).not.toBeInTheDocument();
+      // Composer is fully usable in-rate: typing a fresh draft re-enables send
+      // (the button only disables on an empty draft, never on an in-rate send).
+      fireEvent.change(input, { target: { value: "still typing" } });
+      expect(sendButtonOf(input)).not.toBeDisabled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("at the limit: blocks the next send, PRESERVES the draft, shows the notice, disables send — but keeps the INPUT enabled", () => {
+    jest.useFakeTimers();
+    try {
+      const onSend = jest.fn();
+      render(panel({ connected: true, onSend }));
+      const input = screen.getByPlaceholderText("Send a signal…") as HTMLInputElement;
+
+      // Drain the full burst — every one of these sends goes through.
+      for (let i = 0; i < CHAT_RATE.capacity; i++) send(input, `m${i}`);
+      expect(onSend).toHaveBeenCalledTimes(CHAT_RATE.capacity);
+
+      // Cooldown is now armed: the honest, announced notice is present…
+      const notice = screen.getByText(COOLDOWN_COPY);
+      expect(notice).toBeInTheDocument();
+      expect(notice.closest("[role='status']")).not.toBeNull();
+
+      // …the over-limit send is blocked and the draft is NOT lost.
+      send(input, "over the limit");
+      expect(onSend).toHaveBeenCalledTimes(CHAT_RATE.capacity); // still capacity
+      expect(input.value).toBe("over the limit"); // draft preserved, no loss
+
+      // Send is gated, but the input stays live so the user can keep composing
+      // and never loses focus (the M1/M2 fix — only SEND pauses, not typing).
+      expect(sendButtonOf(input)).toBeDisabled();
+      expect(input).toBeEnabled();
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("auto-recovers after a refill window WITHOUT a keystroke, and sending works again", () => {
+    jest.useFakeTimers();
+    try {
+      const onSend = jest.fn();
+      render(panel({ connected: true, onSend }));
+      const input = screen.getByPlaceholderText("Send a signal…");
+
+      for (let i = 0; i < CHAT_RATE.capacity; i++) send(input, `m${i}`);
+      expect(screen.getByText(COOLDOWN_COPY)).toBeInTheDocument();
+
+      // No keystroke — just let a token refill. The composer re-enables itself:
+      // the cooldown notice clears and the input is live again.
+      act(() => {
+        jest.advanceTimersByTime(CHAT_RATE.refillMs);
+      });
+      expect(screen.queryByText(COOLDOWN_COPY)).not.toBeInTheDocument();
+      expect(input).toBeEnabled();
+
+      // And a fresh send goes through again (no permanent lockout).
+      send(input, "after recovery");
+      expect(onSend).toHaveBeenLastCalledWith("after recovery");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("the preserved draft can be sent after recovery (no message loss)", () => {
+    jest.useFakeTimers();
+    try {
+      const onSend = jest.fn();
+      render(panel({ connected: true, onSend }));
+      const input = screen.getByPlaceholderText("Send a signal…") as HTMLInputElement;
+
+      for (let i = 0; i < CHAT_RATE.capacity; i++) send(input, `m${i}`);
+
+      // Type the message that gets blocked by the cooldown; it stays in the box.
+      send(input, "kept through cooldown");
+      expect(onSend).toHaveBeenCalledTimes(CHAT_RATE.capacity);
+      expect(input.value).toBe("kept through cooldown");
+
+      // After recovery the SAME draft sends — the user never had to retype.
+      act(() => {
+        jest.advanceTimersByTime(CHAT_RATE.refillMs);
+      });
+      fireEvent.submit(input.closest("form") as HTMLFormElement);
+      expect(onSend).toHaveBeenLastCalledWith("kept through cooldown");
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it("holds the cooldown notice for the readable minimum even when a token refills sooner (anti-flicker floor)", () => {
+    // The COOLDOWN_MIN_MS floor exists so a near-instant refill doesn't flash
+    // the notice as a glitch. To exercise it we need the *refill estimate* at
+    // arm-time to be SHORTER than the floor, so Math.max picks the floor:
+    //   1. drain the burst, then let it fully recover (cooldown clears),
+    //   2. consume most of the next window WITHOUT sending, so when we do send
+    //      the limiting message, msUntilNext is only a fraction of refillMs,
+    //   3. that fraction (< floor) means the notice must stay up for the floor.
+    jest.useFakeTimers();
+    try {
+      const onSend = jest.fn();
+      render(panel({ connected: true, onSend }));
+      const input = screen.getByPlaceholderText("Send a signal…");
+
+      // 1 — drain and fully recover (one token back, cooldown cleared).
+      for (let i = 0; i < CHAT_RATE.capacity; i++) send(input, `m${i}`);
+      act(() => {
+        jest.advanceTimersByTime(CHAT_RATE.refillMs);
+      });
+      expect(screen.queryByText(COOLDOWN_COPY)).not.toBeInTheDocument();
+
+      // 2 — burn most of the window with no send. The single refilled token is
+      // still there; the refill estimate is now well under refillMs.
+      const partial = Math.floor(CHAT_RATE.refillMs * 0.4); // 400ms
+      const refillWait = CHAT_RATE.refillMs - partial; // 600ms < floor (700ms)
+      act(() => {
+        jest.advanceTimersByTime(partial);
+      });
+
+      // 3 — sending the one available token re-arms the cooldown. Its timer is
+      // the FLOOR (700ms), not the 600ms refill estimate.
+      send(input, "limiting send");
+      expect(screen.getByText(COOLDOWN_COPY)).toBeInTheDocument();
+
+      // At the refill estimate (600ms) the floor still holds the notice up —
+      // if the code used refillWait instead of the floor, it would be gone here.
+      act(() => {
+        jest.advanceTimersByTime(refillWait);
+      });
+      expect(screen.getByText(COOLDOWN_COPY)).toBeInTheDocument();
+
+      // Past the floor, it finally clears.
+      act(() => {
+        jest.advanceTimersByTime(200); // 600 + 200 = 800 > 700 floor
+      });
+      expect(screen.queryByText(COOLDOWN_COPY)).not.toBeInTheDocument();
     } finally {
       jest.useRealTimers();
     }

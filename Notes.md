@@ -1084,3 +1084,108 @@ Shown consistently in the **map peer-list**, the **ConnectionPrompt**, and the *
 - **Explore gaze / face-presence detection (ML)** as an honest *stronger* signal than tab focus — with the same hard honesty rule: only claim what it actually verifies.
 
 **Phase 4 deliverable:** A self-designed "make it alive *and* safe" arc — Reciprocal Video (clear video flows only while both strangers are present, enforced at the media source on a gated clone so your own self-view never goes dark, fail-closed against dropped channels), a full UI/UX accessibility pass that makes the core action keyboard-reachable, speakable color-blind-safe **call-sign** identity, and a live **typing indicator** — every piece built on the existing data channel with copy that claims exactly what it delivers, no new API, no schema change, and no regression to Phases 1–3.
+
+---
+---
+
+# Phase 4 (continued): Make It Safe — Spam Resistance & "Block & Next"
+
+**Status:** Complete (built after the Reciprocal Video arc above, on the same `feature/phase-4-privacy-shield` branch)
+**Scope:** Two abuse-resistance features for anonymous 1:1 chat — a P2P chat **rate-limit clamp** and **Block & Next**. Frontend-only: no new API route, no schema change, no persistence. The whole arc is a study in *honest scoping* — figuring out which "anti-abuse" features the architecture can actually deliver, and refusing the ones that would be theater.
+
+---
+
+## The Brief & The Thinking
+
+The trigger was a product question: add a **screenshot/recording deterrent** ("peer may be recording"), **content moderation**, and a **spam blocker**? Two of the three hit architectural walls, and naming them is the point:
+
+- **Recording detection is impossible.** No browser API tells you the peer screenshotted or screen-recorded. OS-level capture is invisible to the page. A "peer may be recording" notice would fire on *no real signal* — the same false-confidence trap we rejected with the SAS phrase and the "block screenshots" idea earlier in Phase 4. Declined.
+- **Content moderation fights the architecture.** Chat travels **peer-to-peer**; the server never sees message content (that's the privacy model). Server-side moderation is impossible without routing content through the backend and breaking the no-persistence spine. Client-side moderation of 1:1 anonymous chat is low-value and trivially bypassed. The correct safety primitive for 1:1 isn't moderation — it's **block/disconnect**. Declined (redirected to Block & Next).
+- **Spam blocking is partially tractable** — and became the first feature.
+
+The honest through-line: in a P2P system you **cannot trust the remote client** (it's editable JS), and the server **cannot see P2P traffic**. So abuse defense has to be **receiver-side**, and it has to be honest about being a *mitigation*, not a *prevention*.
+
+---
+
+## Feature A: The P2P Chat Rate-Limit Clamp
+
+**Why the Phase 3 limiter doesn't apply.** Phase 3 added a Postgres rate limiter on the HTTP API — but chat messages never touch the API. They ride the **WebRTC data channel**, peer-to-peer. The server is blind to them by design, so server-side rate limiting can't see a chat flood.
+
+**Where enforcement must live.** A sender-side throttle is editable by a malicious peer, so it can only be a UX guardrail. The real defense is **receiver-side**: each client clamps the messages it *receives*. You only control your own client, so the side being protected does the enforcing.
+
+**What shipped:**
+- **Inbound clamp** (`lib/webrtc.ts`) — a token-bucket on inbound chat at the single `dc.onmessage` choke point. Excess chat is **dropped silently** before it renders, protecting the local render path from a flood.
+- **Type-awareness (non-negotiable)** — *only* `t:"msg"` (chat) is clamped. `t:"ctrl"` (presence heartbeats + reciprocal-video signaling) and `t:"typing"` are **never** throttled. This is the one place the feature could have done harm: a blanket channel throttle would drop heartbeats → false "peer away" → cut video at the 4s timeout, **regressing the shipped Reciprocal Video shield.** Locked in with explicit invariant tests (a chat flood must never drop a `ctrl` frame).
+- **Outbound cooldown** (`app/components/ChatPanel.tsx`) — because the peer drops your excess *silently*, an honest fast-typer's real messages would vanish on the other end with no feedback. So the composer shows a cooldown at the same limit. Crucially, **only sending is gated — the input stays enabled** (disabling a focused input drops focus to `<body>` and ejects an active typer; the ui-ux-critic caught this). The draft is never lost or queued.
+- **One shared constant** (`lib/chatRate.ts`) — both sides import `CHAT_RATE`, so inbound and outbound limits can never drift.
+
+**The clock-skew honesty fix (QA finding).** The honesty invariant is *"a compliant sender is never silently dropped by a compliant receiver."* Equal capacity holds only **numerically** — across two **independent wall clocks**, boundary jitter can let the sender's bucket grant a token while the receiver's is still empty, silently dropping a compliant message. The fix: the **inbound clamp runs strictly more permissive** than outbound (a small grace), so "outbound ≤ inbound" holds **temporally**, not just on paper. Proved with a two-bucket lagging-clock test.
+
+**The honest framing (stakeholder ruling).** This was scoped *down* from "abuse protection / security core" to what it actually is: a **render-flood clamp**. Tab-close already neutralizes most of the threat; a determined spammer can fork the client. The naming had to stay honest — the same discipline as the rest of Phase 4. The stakeholder also **rejected** an inbound "peer is sending too fast" indicator (silent drop is more honest; you don't owe an attacker UX) and a `ctrl`-flood guard (pure-adversary, no honest-user story).
+
+---
+
+## The Realization: Rate-Limiting Can't *Prevent* Spam
+
+In real use, the limit didn't appear to stop anything — a user sent a dozen messages and they all went through. That surfaced the honest truth, and it's worth recording because it drove the next feature: **client-side rate limiting cannot prevent a determined spammer.** The remote client is editable JS — delete the cooldown and blast away. The only thing your client controls is **its own render path** (which the inbound clamp protects). And your *own* sent messages always render locally — hiding them from yourself would be pointless. Rate-limiting clamps a *symptom*. The *cure* for an abusive peer in anonymous 1:1 is to **refuse them** — Block & Next.
+
+---
+
+## Feature B: Block & Next
+
+**Architecture finding that reshaped it.** Discovery is **manual map selection** — there is no matchmaking. So **"Next" is not "auto-connect to a new stranger"** (that would be inventing matchmaking the app deliberately lacks). It means: tear down, return to the map, and the blocked peer is **gone from it.** The stakeholder explicitly rejected auto-advance.
+
+**What shipped (three surfaces, one ephemeral blocklist):**
+- **The blocklist** is an in-memory `useRef<Set<string>>` in `page.tsx` — no DB, no `localStorage`, no schema. It dies with the tab *on purpose* (see the honesty ceiling).
+- **Block** (`blockPeer()`) — captures the peer id, adds it to the set, emits `end`, and tears down. It **records and tears down unconditionally**, never depending on the network emit succeeding.
+- **Exclude from discovery** — the poll-tick filters blocked ids out at the single `setPeers` point, so they vanish from map dots, the accessible "Nearby signals" list, and the count. (`WorldMap` is unchanged — it renders what it's given.)
+- **Auto-decline** — a blocked peer's inbound connection request is silently declined in `processSignal`, so the blocker is never re-prompted by someone they escaped — and it's **indistinguishable from a normal decline** (no "you're blocked" leak that would invite a refresh-for-new-identity or escalation).
+- The two pure decisions were extracted to `lib/blocklist.ts` (`filterBlockedPeers`, `isBlockedRequest`) so they're unit-testable without rendering the heavy page.
+
+**The honest ceiling (stated in the UI, enforced in a test).** Peer identity is a **per-page-load UUID**, so a block is *"refuse this identity for this session."* A reload or a forked client gets a new identity and **may reappear**. The copy says **"for this session"**, banned words (forever/permanently/always/for good) are forbidden, and a test asserts a fresh `Set` doesn't block — so no future contributor can quietly "improve" the blocklist into `localStorage` and turn a session refusal into a persistence violation.
+
+**Accessibility — the safety net must work for the people who need it most.** Block is a single-tap destructive action (a confirm modal during active abuse is friction paid by the *victim*, not the attacker), so **Undo** is the safety net. The ui-ux-critic and a focused review found and fixed real gaps:
+- The original **icon-only** button read as *less* deliberate than the labeled "End chat," inverting the intended severity → gave Block a **visible label** with a heavier danger fill.
+- The Undo toast was a **conditionally-mounted** live region (may not announce) and after block, `ChatPanel` unmounts so focus fell to `<body>` → switched to **persistent dual live regions** (polite + assertive, always mounted) and **move focus to the Undo button** when the toast appears, returning it to `<main>` on dismiss.
+- A **ghost-focus** bug (the whole toast was `aria-hidden` while focus moved *into* it — you can't un-hide a descendant of an `aria-hidden` subtree) → hide only the redundant text span, leaving the Undo button a real, focusable, announced control.
+- A **latent** defect (QA): the focus effect was keyed on a derived `hasAction` boolean, so a *second* action toast within the window wouldn't re-focus its Undo → re-keyed on the notice **nonce**. Unreachable today, but a landmine the moment a second action toast is added.
+
+**The deliberate decision NOT to build server-side block.** The residual gap is real: a blocked peer still *sees* the blocker on their own map and gets a polite "declined" if they click. Removing that requires server-side block state. We **chose not to**, and the reasoning is the feature's thesis:
+1. The safety goal is **already met** — you're unreachable and they're gone from *your* world; server-side block only changes the *abuser's* view.
+2. It hits the **same evasion ceiling** — a refresh yields a new UUID and they reappear regardless. Big change (DB + API + TTL + bidirectional filtering) for a *cosmetic* gain.
+3. It would make the block **look stronger than it is** — the exact false-confidence trap we've rejected all through Phase 4.
+4. It would force the server to hold **"A blocked B" relationship metadata** — which cuts against the privacy-first anonymity. Keeping the blocklist in the tab keeps that knowledge where it belongs.
+
+So the "still sees you + declined" behavior isn't a bug — it's the **honest cost of anonymity**, and "declined" is exactly right because it leaks nothing.
+
+---
+
+## How We Worked & Verification
+
+Both features ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `frontend-engineer` → `ui-ux-critic` → engineer fixes → `test-engineer` → `code-reviewer` (**SHIP**) → `qa-engineer` (**QA-READY**).
+
+- **Tests grew across the arc: 140 → 171 (rate-limit clamp) → 188 passing (Block & Next).** New coverage: the `TokenBucket` math + type-awareness invariants + the clock-skew two-bucket test; the cooldown UX (input stays enabled, draft preserved, auto-recovery, anti-flicker floor); the `lib/blocklist.ts` predicates incl. the no-persistence honesty invariant; and the Block control's accessible name + keyboard operability. `tsc` clean, lint clean.
+- **Documented test gap:** no full-page integration test for the `blockPeer → teardown → toast → focus` wiring (it needs a brittle WebRTC/poll mock chain). The *decisions* are fully unit-tested; the React-lifecycle *wiring* is covered by manual QA instead — flagged honestly rather than shipped as a flaky test.
+
+---
+
+## Phase 4 (continued) Change Summary
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `lib/chatRate.ts` (new) | `CHAT_RATE` single constant + `TokenBucket` (injectable clock) + outbound/`Inbound` factories (inbound = capacity + grace) | One source of truth; inbound strictly more permissive so clock skew never silently drops a compliant sender |
+| `lib/webrtc.ts` — inbound clamp | Token-bucket on `t:"msg"` only; `ctrl`/`typing` never throttled | Receiver-side enforcement (the peer is untrusted); protects the render path without starving the video-presence shield |
+| `app/components/ChatPanel.tsx` — cooldown | Outbound cooldown at the same limit; **input stays enabled**, only send gated; draft never lost | Honest feedback for fast typers; disabling a focused input ejects them |
+| `lib/blocklist.ts` (new) | `filterBlockedPeers` / `isBlockedRequest` pure predicates | The block decisions, unit-testable without rendering the page |
+| `app/page.tsx` — Block & Next | In-memory `blockedRef` Set; `blockPeer()` (record + teardown, unconditional); poll-tick discovery filter; auto-decline of blocked requests; persistent live-region Undo toast with focus management | Refuse a peer for the session; ephemeral by design; the Undo safety net works for AT users |
+| `app/components/ChatPanel.tsx` — Block control | Labeled "Block" button beside "End chat" (heavier danger weight); honest `aria-label`/copy | Severity legible; never overpromises ("for this session", no banned words) |
+
+**Total:** A P2P chat **render-flood clamp** (type-aware, receiver-side, clock-skew-honest) + **Block & Next** (session-scoped, in-memory, accessible) — both frontend-only, **no new API route, no schema change, no persistence**. Tests **140 → 188**. `tsc` clean, lint clean, build clean. Full pipeline per feature; code review **SHIP**, QA **QA-READY**.
+**Risk:** Low — additive to the chat path; the clamp is fail-safe (drops only excess chat, never control/heartbeat traffic); the blocklist is ephemeral and reuses the existing `teardown`/signal paths.
+
+**What I'd do next (with more time):**
+- **One focused page-level integration test** for the `blockPeer → teardown → toast → focus-to-Undo → return-to-main` lifecycle (the one path without automated coverage), behind shared `lib/api` + `lib/webrtc` mocks driven by fake timers.
+- Populate the near-empty `.claude/knowledge/conventions.md` / `stack.md` stubs so reviewers have a written convention source (flagged by code review).
+- **Tunable rate params** are already a single constant; a future toggle could expose a stricter/looser tier.
+
+**Phase 4 (continued) deliverable:** Two honest abuse-resistance features for anonymous 1:1 — a **receiver-side chat flood clamp** that protects the render path without ever starving the video-presence shield and is honest across two clocks, and **Block & Next**, which refuses a peer for the session, removes them from your map, and silently declines their return — paired with a clear-eyed decision *not* to build a server-side block that would look stronger than it is. The arc's real deliverable is the **judgment**: recognizing which "anti-abuse" features the P2P/no-persistence architecture can honestly deliver, and declining the theater.
