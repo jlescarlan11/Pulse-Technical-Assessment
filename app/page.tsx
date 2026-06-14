@@ -446,8 +446,6 @@ export default function Home() {
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
-    const clickedPeer = peers.find((p) => p.id === peerId);
-    if (clickedPeer) setOriginPeer({ lat: clickedPeer.lat, lng: clickedPeer.lng });
     setConn({ kind: "requesting", peerId });
     void emitSignal(peerId, "request");
     requestTimer.current = setTimeout(() => {
@@ -591,6 +589,10 @@ export default function Home() {
           if (requestTimer.current) clearTimeout(requestTimer.current);
           void startPeer(sig.fromId, true);
           setConn({ kind: "connecting", peerId: sig.fromId });
+          // Zoom fires for the initiator only now — when the OTHER party accepts.
+          // Mirrors the moment acceptIncoming() fires setOriginPeer for the recipient.
+          const acceptedPeer = peers.find((p) => p.id === sig.fromId);
+          if (acceptedPeer) setOriginPeer({ lat: acceptedPeer.lat, lng: acceptedPeer.lng });
         }
         break;
       }
@@ -863,7 +865,8 @@ export default function Home() {
   }
 
   // ChatPanel only mounts once the data channel is open. During the "connecting"
-  // handshake, WorldMap stays visible and plays the Origin Story zoom instead.
+  // handshake, WorldMap stays visible (Origin Story zoom plays) and a "Connecting…"
+  // pill shows so the user knows something is happening.
   const inChat = conn.kind === "connected";
   const activePeerId = conn.kind !== "idle" ? conn.peerId : undefined;
 
@@ -872,7 +875,11 @@ export default function Home() {
     // Block→Undo toast is dismissed/timed-out — see returnFocusToMain (M1).
     <main ref={mainRef} tabIndex={-1} className="fixed inset-0 overflow-hidden outline-none">
       <WorldMap
-        peers={peers}
+        peers={
+          conn.kind === "connecting" || conn.kind === "connected"
+            ? peers.filter((p) => p.id === activePeerId)
+            : peers
+        }
         me={myLocation}
         onPeerClick={requestConnection}
         canConnect={conn.kind === "idle"}
@@ -1015,6 +1022,19 @@ export default function Home() {
           >
             Cancel
           </button>
+        </div>
+      )}
+
+      {conn.kind === "connecting" && (
+        <div
+          role="status"
+          className="animate-pill-in glass absolute left-1/2 top-20 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm text-haze-100"
+        >
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-signal" />
+          </span>
+          <span>Connecting…</span>
         </div>
       )}
 

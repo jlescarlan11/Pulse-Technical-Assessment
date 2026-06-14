@@ -1387,3 +1387,62 @@ Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `
 - **Coalesced "N delivered" announcement** if real ack cadence ever makes the per-delivery polite announcement chatty.
 
 **Phase 4 (continued) deliverable:** Delivery Echo answers "did it land?" with a signal that claims only what the architecture can prove. The discipline is in what it refuses — no server witness (chat stays P2P), no "Seen" (we can't prove a human read it), no timeout (only a real ack delivers), and no per-bubble clutter (newest-only). The honest "Delivered" is a stronger, truer claim than the read-receipt theater it deliberately avoids.
+
+---
+
+# Phase 4: Origin Story — Where You Found Each Other
+
+**Status:** Shipped
+**Date:** 2026-06-15
+**Branch:** `feature/origin-story`
+
+**Brief & thinking:** Every P2P connection has a moment of mutual agreement — both parties clicked Connect. That moment is invisible; the map just swaps to the chat panel. Origin Story makes it felt: the instant both parties commit, the WorldMap camera flies to frame both dots together, spinning and tilting as it zooms in. The handshake becomes a cinematic beat rather than a loading gap.
+
+**What it is not:** A separate overlay, a second Mapbox instance, or an artificial pause after the connection opens. An earlier version built exactly that — a full-screen `OriginStoryOverlay` component with its own map, 3-second auto-dismiss, and post-connect mount — and it felt like an interruption. The rebuild throws all of that away.
+
+**What it is:** A single `useEffect` on the existing `WorldMap` that fires when `originPeer` is set. No new infrastructure — the same map, the same markers, one camera move.
+
+**The trigger — both sides, same moment:**
+- **Initiator (Party A):** `originPeer` is set when the `accept` signal arrives — i.e., when the *other party* clicks Connect. Not when A clicks the dot. A sees nothing until B commits.
+- **Recipient (Party B):** `originPeer` is set inside `acceptIncoming()` — the moment B clicks Connect.
+- Both transitions happen at the same logical event (B's acceptance). The network round-trip means A fires a fraction of a second later, which is imperceptible.
+
+**The animation:**
+- `map.cameraForBounds()` computes the exact center and zoom to frame both dots within the UI padding — no `maxZoom` cap, so it frames *precisely* where they are regardless of distance.
+- `flyTo` with `bearing + 90°` and `pitch: 30°`: the map rotates a quarter-turn and tilts like a globe as it swoops in.
+- Easing: `t³` → expo-in (`2^(10t−10)`) — nearly still for the first ~70% of the duration, then rockets to the destination. The "slow… then snap" feel the user asked for.
+- Duration: 3 000 ms, letting the handshake fill the natural wait time.
+- On teardown: `easeTo({ bearing: 0, pitch: 0 })` eases the map back to north-up flat.
+- Reduced-motion: `jumpTo` throughout, no animation.
+- Same-point fallback (identical coordinates): `flyTo({ zoom: 13 })` instead of `fitBounds` on a zero-area box.
+
+**Other dots disappear on connect:** When `conn.kind` is `connecting` or `connected`, `peers` passed to WorldMap is filtered to only the active peer. Everyone else fades out, leaving just the two connecting dots in frame.
+
+**"Connecting…" pill:** ChatPanel mounts only on `connected` (data channel open), so during the handshake the WorldMap zoom is the full screen. A floating pill ("Connecting…" with the pulsing signal dot, same glass style as "Sending signal…") tells both parties something is happening.
+
+**Honesty:** GPS coordinates are offset 1–3 km per session for privacy. Origin Story uses them only for camera framing — showing approximate location — which is honest. No distance-based condition logic, no trigger that depends on the offset being small or accurate.
+
+**What was explored and rejected:**
+- `OriginStoryOverlay.tsx` — separate Mapbox instance, post-connect mount, 3 s auto-dismiss, peerColor marker. Built fully, passed all quality gates, then rejected by the user: *"it feels buggy."* Deleted in full (251 test lines + 225 component lines).
+- Firing zoom for the initiator at `requestConnection` time — triggered before the other party agreed, so the two tabs zoomed at different moments and to different positions.
+- `maxZoom: 14` / `maxZoom: 12` caps — prevented Mapbox from finding the right zoom to frame both dots when they were close together. Removed entirely; `cameraForBounds` frames exactly what it's given.
+
+**Change summary:**
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `app/components/WorldMap.tsx` | `originPeer` prop + `useEffect` with `cameraForBounds` + `flyTo` (bearing spin, pitch tilt, expo-in easing) + teardown reset | One effect on the existing map; no new component |
+| `app/page.tsx` — trigger | Removed `setOriginPeer` from `requestConnection`; added to `accept` signal handler and `acceptIncoming` | Both sides zoom at the same logical moment (mutual commitment) |
+| `app/page.tsx` — peer filter | `peers` filtered to active peer only during `connecting`/`connected` | Other dots fade out; only the two connecting dots remain in frame |
+| `app/page.tsx` — "Connecting…" pill | New pill for `conn.kind === "connecting"`, matching "Sending signal…" style | Fills the handshake gap while ChatPanel is not yet mounted |
+| `app/page.tsx` — `inChat` | `connected` only (was `connecting \|\| connected`) | Keeps WorldMap + zoom visible during the handshake |
+| `app/components/OriginStoryOverlay.tsx` | Deleted | Superseded by the WorldMap camera approach |
+| `app/components/OriginStoryOverlay.test.tsx` | Deleted | 6 tests for the rejected approach |
+
+**Total:** A cinematic mutual-commitment beat built entirely on existing infrastructure — one prop, one effect, one camera move. Frontend-only: **no API route, no schema change, no signaling change.** Suite stays **469/469**. `tsc` clean, lint clean.
+**Risk:** Low — additive to WorldMap (new prop, default null); page.tsx changes are pure state routing with no effect on the WebRTC handshake itself.
+
+**What I'd do next (with more time):**
+- **A subtle label** ("You found each other near [place name]") using Mapbox reverse geocoding on the midpoint — the honest version of naming the moment without over-claiming exact location.
+- **Smooth peer-dot entrance:** when the filter switches from all-peers to just the active peer, a CSS fade-out on departing markers would make the "others disappear" feel intentional rather than abrupt.
+- **Reset camera position on teardown** to re-center on the user's own dot after a session ends, so the map doesn't stay zoomed in on a previous connection's location.

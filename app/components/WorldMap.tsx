@@ -59,6 +59,9 @@ export default function WorldMap({
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const meMarkerRef = useRef<Marker | null>(null);
   const [ready, setReady] = useState(false);
+  // Tracks whether origin-story zoom is active so the null→cleared case can
+  // reset the bearing back to north (ignoring the initial null on mount).
+  const originActiveRef = useRef(false);
 
   // Phase 4 (map controls) — zoom-bound flags drive the at-limit state of the
   // +/- buttons. WHY aria-disabled (not the native `disabled` attr): a control
@@ -202,35 +205,65 @@ export default function WorldMap({
     })();
   }, [peers]);
 
-  // Origin Story — fly the camera to frame both dots the moment either party
-  // clicks "Connect". Fires during the WebRTC handshake while the map is still
-  // visible, so the zoom fills the natural wait time instead of an empty screen.
-  // Clears when teardown() sets originPeer back to null.
+  // Origin Story — fires when BOTH parties have agreed to connect (the initiator
+  // gets setOriginPeer from the "accept" signal; the recipient from acceptIncoming).
+  // Spins the bearing 90° as it zooms in — the "turning to find each other" effect.
+  // On teardown (originPeer → null) eases the bearing back to north.
   useEffect(() => {
-    if (!originPeer || !me || !ready) return;
+    if (!me || !ready) return;
     const map = mapRef.current;
     if (!map) return;
+
+    if (!originPeer) {
+      if (originActiveRef.current) {
+        originActiveRef.current = false;
+        const reduced = prefersReducedMotion();
+        if (reduced) {
+          map.jumpTo({ bearing: 0, pitch: 0 });
+        } else {
+          map.easeTo({ bearing: 0, pitch: 0, duration: 1200 });
+        }
+      }
+      return;
+    }
+
+    originActiveRef.current = true;
     void (async () => {
       const mapboxgl = (await import("mapbox-gl")).default;
       if (mapRef.current !== map) return;
       const reduced = prefersReducedMotion();
+      const spinBearing = map.getBearing() + 90;
+      // Expo ease-in: nearly still for most of the duration, then rockets to destination.
+      const easing = (t: number) => t === 0 ? 0 : Math.pow(2, 10 * t - 10);
       const samePoint = me.lat === originPeer.lat && me.lng === originPeer.lng;
+
       if (samePoint) {
-        const camera = { center: [me.lng, me.lat] as [number, number], zoom: 13 };
+        const camera = { center: [me.lng, me.lat] as [number, number], zoom: 13, bearing: spinBearing, pitch: 30 };
         if (reduced) {
           map.jumpTo(camera);
         } else {
-          map.flyTo(camera);
+          map.flyTo({ ...camera, duration: 3000, easing });
         }
       } else {
         const bounds = new mapboxgl.LngLatBounds();
         bounds.extend([me.lng, me.lat]);
         bounds.extend([originPeer.lng, originPeer.lat]);
-        map.fitBounds(bounds, {
+        const target = map.cameraForBounds(bounds, {
           padding: { top: 96, bottom: 112, left: 84, right: 64 },
-          maxZoom: FRAME_MAX_ZOOM,
-          animate: !reduced,
         });
+        if (!target) return;
+        if (reduced) {
+          map.jumpTo({ center: target.center, zoom: target.zoom ?? 14 });
+        } else {
+          map.flyTo({
+            center: target.center,
+            zoom: target.zoom ?? 14,
+            bearing: spinBearing,
+            pitch: 30,
+            duration: 3000,
+            easing,
+          });
+        }
       }
     })();
   }, [originPeer, me, ready]);
