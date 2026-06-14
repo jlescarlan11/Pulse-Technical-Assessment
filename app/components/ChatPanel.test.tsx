@@ -61,7 +61,9 @@ function renderPanel(over: Partial<React.ComponentProps<typeof ChatPanel>> = {})
   return render(panel(over));
 }
 
-const msgs: ChatMessage[] = [{ id: 1, mine: false, text: "hey there" }];
+const msgs: ChatMessage[] = [
+  { id: 1, mine: false, text: "hey there", createdAt: Date.now() },
+];
 
 describe("ChatPanel empty / connecting message-area states (FIX 3)", () => {
   it("connected + no messages -> shows the 'Say hello.' invite, not a connecting state", () => {
