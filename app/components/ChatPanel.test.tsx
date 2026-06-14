@@ -629,3 +629,228 @@ describe("ChatPanel outbound send cooldown (Story 2)", () => {
     }
   });
 });
+
+describe("ChatPanel Fade Trails (visual decay by age)", () => {
+  // The decay constants, mirrored from ChatPanel.tsx so the assertions stay in
+  // step with the source. Per-style FLOORS: mine rests deeper (intrinsic
+  // contrast), incoming rests higher (composited AA legibility). DECAY_MS is the
+  // age at which a non-newest bubble reaches its floor.
+  const DECAY_MS = 90_000;
+  const FLOOR_MINE = 0.35;
+  const FLOOR_INCOMING = 0.55;
+
+  // A fixed wall-clock origin so age = NOW - createdAt is fully deterministic.
+  // We pin Date.now() (which both the ticker and the render read) to NOW via
+  // fake timers, then choose each message's createdAt to set its exact age.
+  const NOW = 1_700_000_000_000;
+
+  // Read the inline opacity the component set on a bubble's text span. The decay
+  // opacity lives on the SPAN that holds the message text (style={{ opacity }}),
+  // so we query by the message text and read its own style — observable exactly
+  // as a sighted user perceives the dimming.
+  function opacityOf(text: string): number {
+    const span = screen.getByText(text);
+    return Number.parseFloat(span.style.opacity || "1");
+  }
+
+  function mine(id: number, text: string, ageMs: number): ChatMessage {
+    return { id, mine: true, text, createdAt: NOW - ageMs };
+  }
+  function incoming(id: number, text: string, ageMs: number): ChatMessage {
+    return { id, mine: false, text, createdAt: NOW - ageMs };
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(NOW);
+  });
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it("a fresh message (age 0) renders at FULL opacity (1)", () => {
+    // Two messages so the one under test is NOT the newest (newest is always
+    // pinned to full regardless of age — tested separately).
+    renderPanel({
+      connected: true,
+      messages: [incoming(1, "fresh line", 0), mine(2, "newer", 0)],
+    });
+    expect(opacityOf("fresh line")).toBeCloseTo(1, 5);
+  });
+
+  it("the NEWEST message stays at FULL opacity (1) even with an ancient createdAt", () => {
+    // Give the last message a very old createdAt; being newest pins it to full
+    // so the active line of conversation is always the most legible.
+    renderPanel({
+      connected: true,
+      messages: [
+        incoming(1, "older line", 0),
+        mine(2, "newest but ancient", DECAY_MS * 3),
+      ],
+    });
+    expect(opacityOf("newest but ancient")).toBeCloseTo(1, 5);
+  });
+
+  it("an OLD non-newest INCOMING message rests at its floor (0.55), not below", () => {
+    renderPanel({
+      connected: true,
+      messages: [
+        incoming(1, "old incoming", DECAY_MS * 2), // well past the floor age
+        mine(2, "anchor newest", 0),
+      ],
+    });
+    const op = opacityOf("old incoming");
+    expect(op).toBeCloseTo(FLOOR_INCOMING, 5);
+    expect(op).toBeGreaterThanOrEqual(FLOOR_INCOMING);
+  });
+
+  it("an OLD non-newest MINE message rests at its deeper floor (0.35), not below", () => {
+    renderPanel({
+      connected: true,
+      messages: [
+        mine(1, "old mine", DECAY_MS * 2),
+        mine(2, "anchor newest", 0),
+      ],
+    });
+    const op = opacityOf("old mine");
+    expect(op).toBeCloseTo(FLOOR_MINE, 5);
+    expect(op).toBeGreaterThanOrEqual(FLOOR_MINE);
+  });
+
+  it("decay is MONOTONIC: a more-aged non-newest bubble is ≤ a less-aged one, never below floor", () => {
+    renderPanel({
+      connected: true,
+      messages: [
+        incoming(1, "very old", DECAY_MS), // oldest non-newest
+        incoming(2, "less old", DECAY_MS / 3),
+        incoming(3, "recent", DECAY_MS / 10),
+        mine(4, "anchor newest", 0),
+      ],
+    });
+    const veryOld = opacityOf("very old");
+    const lessOld = opacityOf("less old");
+    const recent = opacityOf("recent");
+
+    // Older ≤ younger (the fade only ever dims with age).
+    expect(veryOld).toBeLessThanOrEqual(lessOld);
+    expect(lessOld).toBeLessThanOrEqual(recent);
+    // …and nothing falls below the incoming floor.
+    expect(veryOld).toBeGreaterThanOrEqual(FLOOR_INCOMING);
+  });
+
+  it("HONESTY: a fully-decayed message's TEXT stays in the DOM and readable (not removed / not hidden)", () => {
+    renderPanel({
+      connected: true,
+      messages: [
+        incoming(1, "ghost but present", DECAY_MS * 5),
+        mine(2, "anchor newest", 0),
+      ],
+    });
+    // The text node still exists — decay is opacity-only, never a deletion.
+    const span = screen.getByText("ghost but present");
+    expect(span).toBeInTheDocument();
+    // Not display:none, not aria-hidden — the a11y tree stays full-fidelity.
+    expect(span.style.display).not.toBe("none");
+    expect(span.closest("[aria-hidden='true']")).toBeNull();
+    // And the floor is ABOVE zero, so a dimmed line is still plainly there.
+    expect(opacityOf("ghost but present")).toBeGreaterThan(0);
+  });
+
+  it("the shared ticker is cleared on unmount — no setInterval is left running", () => {
+    const clearSpy = jest.spyOn(global, "clearInterval");
+    const { unmount } = renderPanel({
+      connected: true,
+      messages: [incoming(1, "aging line", 0), mine(2, "newest", 0)],
+    });
+
+    // With messages present the ticker is armed; advancing time runs it without
+    // throwing (no setState-after-unmount once we tear down).
+    act(() => {
+      jest.advanceTimersByTime(2000);
+    });
+
+    unmount();
+    // The decay interval is cleared on teardown — no leaked ticker.
+    expect(clearSpy).toHaveBeenCalled();
+
+    // Advancing further after unmount must not fire any React state update
+    // (would log an act/"update on unmounted" warning if the timer survived).
+    const errSpy = jest.spyOn(console, "error").mockImplementation(() => {});
+    act(() => {
+      jest.advanceTimersByTime(10_000);
+    });
+    expect(errSpy).not.toHaveBeenCalled();
+
+    errSpy.mockRestore();
+    clearSpy.mockRestore();
+  });
+});
+
+describe("ChatPanel Fade Trails under prefers-reduced-motion (discrete step)", () => {
+  // Reduced motion replaces the smooth interpolation with a single discrete
+  // FULL→FLOOR step at the midpoint (DECAY_MS / 2). We assert the STEP shape (no
+  // intermediate interpolated value) and that text stays present at the floor.
+  const DECAY_MS = 90_000;
+  const STEP_MS = DECAY_MS / 2;
+  const FLOOR_INCOMING = 0.55;
+  const NOW = 1_700_000_000_000;
+
+  function opacityOf(text: string): number {
+    return Number.parseFloat(screen.getByText(text).style.opacity || "1");
+  }
+  function incoming(id: number, text: string, ageMs: number): ChatMessage {
+    return { id, mine: false, text, createdAt: NOW - ageMs };
+  }
+
+  let realMatchMedia: typeof window.matchMedia;
+  beforeEach(() => {
+    jest.useFakeTimers();
+    jest.setSystemTime(NOW);
+    realMatchMedia = window.matchMedia;
+    // Report reduce=true only for the reduced-motion query; read at mount by the
+    // component's prefersReducedMotion(), mirroring the WorldMap suite's mock.
+    window.matchMedia = jest.fn().mockImplementation((query: string) => ({
+      matches: query.includes("prefers-reduced-motion"),
+      media: query,
+      onchange: null,
+      addEventListener: jest.fn(),
+      removeEventListener: jest.fn(),
+      addListener: jest.fn(),
+      removeListener: jest.fn(),
+      dispatchEvent: jest.fn(),
+    })) as unknown as typeof window.matchMedia;
+  });
+  afterEach(() => {
+    window.matchMedia = realMatchMedia;
+    jest.useRealTimers();
+  });
+
+  it("a recent (pre-midpoint) non-newest bubble holds FULL — no interpolated value", () => {
+    renderPanel({
+      connected: true,
+      messages: [
+        incoming(1, "still full", STEP_MS - 5_000), // just before the midpoint
+        incoming(2, "newest anchor", 0),
+      ],
+    });
+    // Discrete step: before the midpoint the opacity is exactly FULL, not a
+    // smoothly-eased intermediate the continuous path would have produced.
+    expect(opacityOf("still full")).toBeCloseTo(1, 5);
+  });
+
+  it("a past-midpoint non-newest bubble snaps to its FLOOR (discrete, never below)", () => {
+    renderPanel({
+      connected: true,
+      messages: [
+        incoming(1, "stepped down", STEP_MS + 5_000), // just past the midpoint
+        incoming(2, "newest anchor", 0),
+      ],
+    });
+    const op = opacityOf("stepped down");
+    // One calm step to the per-style floor — and never below it.
+    expect(op).toBeCloseTo(FLOOR_INCOMING, 5);
+    expect(op).toBeGreaterThanOrEqual(FLOOR_INCOMING);
+    // The text is still present and readable at the floor.
+    expect(screen.getByText("stepped down")).toBeInTheDocument();
+  });
+});
