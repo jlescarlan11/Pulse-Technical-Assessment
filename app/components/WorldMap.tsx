@@ -16,6 +16,31 @@ const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 // (route changes, peer churn, reconnects). Cleared when the tab closes.
 const COACH_SEEN_KEY = "pulse.coachSeen";
 
+// Phase 4 (map controls) — the zoom we settle on when centering on the user.
+// Shared by the initial center-on-me (map init) and the Recenter control so the
+// two stay visually identical. ~4 = "your neighbourhood of the world".
+const ME_ZOOM = 4;
+
+// Phase 4 (map controls) — when framing peers, never tunnel past this zoom. The
+// single-peer / coincident-points case has no spatial spread, so fitBounds would
+// otherwise slam to max zoom and look broken (stakeholder tripwire). Capping at
+// ME_ZOOM lands us at the same comfortable altitude as Recenter.
+const FRAME_MAX_ZOOM = ME_ZOOM;
+
+// Phase 4 (map controls) — read the live OS/browser reduced-motion preference at
+// the moment of a camera move. Mapbox JS animates the camera in JS, NOT via CSS
+// transitions, so the globals.css reduced-motion block does NOT govern it — we
+// must branch on this and pass animate:false / use jumpTo ourselves. Read per
+// move (not cached at mount) so toggling the OS setting mid-session is honoured.
+// Guarded for the (never, here) SSR case where matchMedia is absent.
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
+
 export default function WorldMap({
   peers,
   me,
@@ -32,6 +57,22 @@ export default function WorldMap({
   const markersRef = useRef<Map<string, Marker>>(new Map());
   const meMarkerRef = useRef<Marker | null>(null);
   const [ready, setReady] = useState(false);
+
+  // Phase 4 (map controls) — zoom-bound flags drive the at-limit state of the
+  // +/- buttons. WHY aria-disabled (not the native `disabled` attr): a control
+  // that disables itself WHILE it holds keyboard focus makes the browser
+  // synchronously blur it to <body>, ejecting the keyboard user from the cluster
+  // (BUG-5). aria-disabled keeps the button focusable and in the tab order — AT
+  // still announces it as unavailable, the click handler no-ops at the bound, and
+  // focus is never dropped. Synced from the map's "zoom" event (and on ready) —
+  // never read from the map during render.
+  const [atMinZoom, setAtMinZoom] = useState(false);
+  const [atMaxZoom, setAtMaxZoom] = useState(false);
+
+  // Phase 4 (map controls) — `atHome` dims Recenter when tapping it would change
+  // nothing: the pin is already centred AND the map is at the home zoom. Synced
+  // in screen pixels off the live "move" event (see the effect below).
+  const [atHome, setAtHome] = useState(false);
 
   // C2 — accessible fallback path: the count chip toggles a focusable list of
   // nearby signals so keyboard / screen-reader users can connect without
@@ -84,6 +125,80 @@ export default function WorldMap({
     connectRef.current = connectTo;
     canConnectRef.current = canConnect;
   });
+
+  // Phase 4 (map controls) — camera handlers. The buttons are re-rendered every
+  // render, so these can close over live `me` / `peers` directly (no stale-ref
+  // dance needed, unlike the bound-once marker click). Each delegates the zoom
+  // *math* to Mapbox (which clamps to min/max internally and never throws at a
+  // bound); only the chrome + the reduced-motion / framing policy is ours.
+  const zoomIn = useCallback(() => {
+    // aria-disabled buttons stay activatable (Enter/click) — no-op at the bound.
+    if (atMaxZoom) return;
+    mapRef.current?.zoomIn();
+  }, [atMaxZoom]);
+
+  const zoomOut = useCallback(() => {
+    if (atMinZoom) return;
+    mapRef.current?.zoomOut();
+  }, [atMinZoom]);
+
+  // Story 2 — Recenter on me. Fly back to the "You are here" pin at ME_ZOOM
+  // (the same altitude the map opens at). Under reduced motion we jumpTo instead
+  // of flyTo so a reduced-motion user doesn't get a swooping JS camera animation
+  // the CSS reduced-motion block can't reach. Guarded on a live `me`.
+  const recenterOnMe = useCallback(() => {
+    const map = mapRef.current;
+    // No-op when there's no fix or we're already home (the button is aria-disabled
+    // in both cases, but it stays activatable, so guard the action too).
+    if (!map || !me || atHome) return;
+    const camera = { center: [me.lng, me.lat] as [number, number], zoom: ME_ZOOM };
+    if (prefersReducedMotion()) {
+      map.jumpTo(camera);
+    } else {
+      map.flyTo(camera);
+    }
+  }, [me, atHome]);
+
+  // Story 3 — Frame all signals. Fit the camera to every PEER dot at once; the
+  // user's own `me` pin is deliberately excluded so the frame answers "where are
+  // the souls?", not "what's on my screen?" (Recenter already serves "take me to
+  // me"). Two correctnesses ride along:
+  //   • BUG-4 (antimeridian): unwrap each longitude to the SHORTEST arc relative
+  //     to the first peer, so date-line-straddling peers (e.g. +179 and −179)
+  //     frame tightly instead of zooming out around the whole globe the long
+  //     way. Mapbox renders longitudes outside [-180,180] the short way.
+  //   • Coincident/single-peer: clamp to FRAME_MAX_ZOOM so a no-spread point
+  //     lands at a sane altitude instead of slamming to max zoom.
+  // Reduced motion → animate:false (same JS-camera reasoning as Recenter).
+  const frameAllSignals = useCallback(() => {
+    const map = mapRef.current;
+    if (!map || peers.length === 0) return;
+    void (async () => {
+      const mapboxgl = (await import("mapbox-gl")).default;
+      // The map may have been torn down during the dynamic import — bail if the
+      // live ref no longer points at the map we captured.
+      if (mapRef.current !== map) return;
+      const ref = peers[0].lng;
+      const bounds = new mapboxgl.LngLatBounds();
+      for (const peer of peers) {
+        // Unwrap to within 180° of the reference peer (BUG-4): if a peer is more
+        // than half the globe away in raw lng, shift it by ±360 so the pair sits
+        // on the short arc. Latitude passes through untouched.
+        let lng = peer.lng;
+        while (lng - ref > 180) lng -= 360;
+        while (lng - ref < -180) lng += 360;
+        bounds.extend([lng, peer.lat]);
+      }
+      map.fitBounds(bounds, {
+        // Asymmetric padding so framed dots clear the top/bottom scrims and the
+        // bottom-left presence chip instead of hiding under the HUD chrome
+        // (QA BUG-6): more room at the bottom (presence chip + scrim) and left.
+        padding: { top: 96, bottom: 112, left: 84, right: 64 },
+        maxZoom: FRAME_MAX_ZOOM,
+        animate: !prefersReducedMotion(),
+      });
+    })();
+  }, [peers]);
 
   // Resolve coach visibility once on mount and auto-fade after a few seconds.
   // The show is scheduled (not set synchronously in the effect body) to avoid a
@@ -164,7 +279,7 @@ export default function WorldMap({
         style: "mapbox://styles/mapbox/dark-v11",
         // Open centered on the user if we know where they are, else world view.
         center: me ? [me.lng, me.lat] : [0, 20],
-        zoom: me ? 4 : 1.4,
+        zoom: me ? ME_ZOOM : 1.4,
         attributionControl: true,
       });
       map.on("load", () => {
@@ -186,6 +301,59 @@ export default function WorldMap({
     // `me` is only read for the initial center; we don't want to re-init on change.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Phase 4 (map controls) — keep the +/- disabled flags in sync with where the
+  // camera actually is. We compare against a small epsilon (not strict equality)
+  // because Mapbox lands fractionally short of the exact min/max after a wheel /
+  // pinch, and we still want the buttons to lock at the practical limit. Bound
+  // once the map is ready, on the live "zoom" event, and torn down on unmount.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready) return;
+
+    const sync = () => {
+      const z = map.getZoom();
+      const min = map.getMinZoom();
+      const max = map.getMaxZoom();
+      const eps = 0.01;
+      setAtMinZoom(z <= min + eps);
+      setAtMaxZoom(z >= max - eps);
+    };
+
+    sync();
+    map.on("zoom", sync);
+    return () => {
+      map.off("zoom", sync);
+    };
+  }, [ready]);
+
+  // Phase 4 (map controls) — keep `atHome` in sync so Recenter dims exactly when
+  // tapping it would change nothing: the user's pin sits at the viewport centre
+  // AND the zoom is already ME_ZOOM. We measure the centre offset in PIXELS
+  // (project the pin, compare to the projected map centre) so the check is
+  // zoom-robust, and bind the live "move" event (fires on pan AND zoom) so the
+  // button re-lights the instant the user drifts away. With no fix the button is
+  // already disabled, so atHome is held false.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !me) {
+      setAtHome(false);
+      return;
+    }
+
+    const sync = () => {
+      const pin = map.project([me.lng, me.lat]);
+      const centre = map.project(map.getCenter());
+      const offsetPx = Math.hypot(pin.x - centre.x, pin.y - centre.y);
+      setAtHome(offsetPx < 8 && Math.abs(map.getZoom() - ME_ZOOM) < 0.05);
+    };
+
+    sync();
+    map.on("move", sync);
+    return () => {
+      map.off("move", sync);
+    };
+  }, [ready, me]);
 
   // Show / move the user's own "you are here" pin.
   useEffect(() => {
@@ -291,6 +459,11 @@ export default function WorldMap({
 
   const hasPeers = peers.length > 0;
   const showLoading = Boolean(TOKEN) && !ready;
+  // Story 2 — Recenter is live the instant a fix lands; disabled (not hidden)
+  // until then, and also while we're already home (centred at ME_ZOOM), where a
+  // tap would do nothing. Story 3 — Frame needs at least one peer to frame.
+  const canRecenter = me !== null && !atHome;
+  const canFrame = hasPeers;
 
   return (
     <div className="absolute inset-0">
@@ -347,6 +520,127 @@ export default function WorldMap({
           Pulse
         </span>
       </div>
+
+      {/* Phase 4 (map controls) — top-right cluster. Deliberately clears the
+          brand mark (top-left), the coach hint (top-center, left-1/2), the
+          presence chip (bottom-left) and Mapbox attribution (bottom-right). A
+          vertical stack of glass buttons in the HUD vocabulary — NOT Mapbox's
+          white NavigationControl chrome. Only mounts when TOKEN && ready, like
+          the other map-dependent UI. Each button keeps a >=44px hit area (h-11
+          w-11) with a small inner glyph, is a native <button> (keyboard +
+          Enter/Space + the global :focus-visible ring), and surfaces its
+          disabled state to assistive tech via the `disabled` attr. */}
+      {TOKEN && ready && (
+        <div
+          role="group"
+          aria-label="Map controls"
+          className="glass-faint animate-fade-up absolute right-4 top-4 flex flex-col overflow-hidden rounded-xl"
+        >
+          {/* Story 1 — Zoom in. aria-disabled (not native disabled) at the max
+              bound so focus is never yanked off it (BUG-5); the handler no-ops. */}
+          <button
+            type="button"
+            onClick={zoomIn}
+            aria-disabled={atMaxZoom}
+            aria-label="Zoom in"
+            className={`grid h-11 w-11 place-items-center transition-[transform,background-color,color] duration-150 ease-[var(--ease-spring)] ${
+              atMaxZoom
+                ? "cursor-not-allowed text-haze-600 opacity-50"
+                : "text-haze-200 hover:bg-ink-700/50 hover:text-haze-50 active:scale-[0.96] active:bg-ink-700/70"
+            }`}
+          >
+            <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden fill="none">
+              <path
+                d="M8 3v10M3 8h10"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+
+          {/* Hairline between the paired zoom controls. */}
+          <span aria-hidden className="hairline mx-2 border-t" />
+
+          {/* Story 1 — Zoom out. aria-disabled at the min-zoom bound. */}
+          <button
+            type="button"
+            onClick={zoomOut}
+            aria-disabled={atMinZoom}
+            aria-label="Zoom out"
+            className={`grid h-11 w-11 place-items-center transition-[transform,background-color,color] duration-150 ease-[var(--ease-spring)] ${
+              atMinZoom
+                ? "cursor-not-allowed text-haze-600 opacity-50"
+                : "text-haze-200 hover:bg-ink-700/50 hover:text-haze-50 active:scale-[0.96] active:bg-ink-700/70"
+            }`}
+          >
+            <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden fill="none">
+              <path
+                d="M3 8h10"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+
+          {/* Group separator — the nav actions are a distinct cluster from the
+              zoom pair, so this divider sits with extra inset + breathing room
+              (heavier than the intra-pair hairline above). */}
+          <span aria-hidden className="hairline mx-2 my-1 border-t" />
+
+          {/* Story 2 — Recenter on me. Disabled (not hidden) until a fix lands;
+              the `me`-live closure enables it without a remount. */}
+          <button
+            type="button"
+            onClick={recenterOnMe}
+            aria-disabled={!canRecenter}
+            aria-label="Recenter on me"
+            className={`grid h-11 w-11 place-items-center transition-[transform,background-color,color] duration-150 ease-[var(--ease-spring)] ${
+              canRecenter
+                ? "text-haze-200 hover:bg-ink-700/50 hover:text-signal active:scale-[0.96] active:bg-ink-700/70"
+                : "cursor-not-allowed text-haze-600 opacity-50"
+            }`}
+          >
+            <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden fill="none">
+              <circle cx="8" cy="8" r="2.2" stroke="currentColor" strokeWidth="1.6" />
+              <path
+                d="M8 1v2.2M8 12.8V15M1 8h2.2M12.8 8H15"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+            </svg>
+          </button>
+
+          {/* Hairline between the two nav actions. */}
+          <span aria-hidden className="hairline mx-2 border-t" />
+
+          {/* Story 3 — Frame all signals. Disabled when there are no peers to
+              frame. Fits the camera over peers only (own pin excluded). */}
+          <button
+            type="button"
+            onClick={frameAllSignals}
+            aria-disabled={!canFrame}
+            aria-label="Frame all signals"
+            className={`grid h-11 w-11 place-items-center transition-[transform,background-color,color] duration-150 ease-[var(--ease-spring)] ${
+              canFrame
+                ? "text-haze-200 hover:bg-ink-700/50 hover:text-signal active:scale-[0.96] active:bg-ink-700/70"
+                : "cursor-not-allowed text-haze-600 opacity-50"
+            }`}
+          >
+            <svg viewBox="0 0 16 16" className="h-4 w-4" aria-hidden fill="none">
+              <path
+                d="M2 5V3a1 1 0 0 1 1-1h2M11 2h2a1 1 0 0 1 1 1v2M14 11v2a1 1 0 0 1-1 1h-2M5 14H3a1 1 0 0 1-1-1v-2"
+                stroke="currentColor"
+                strokeWidth="1.6"
+                strokeLinecap="round"
+              />
+              <circle cx="8" cy="8" r="1.4" fill="currentColor" />
+            </svg>
+          </button>
+        </div>
+      )}
 
       {/* M2(a) — first-entry coach hint, mono label voice. Auto-fades after a
           few seconds, on first connect, or when dismissed. MINOR 3 — only ever
