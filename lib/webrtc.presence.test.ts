@@ -89,6 +89,7 @@ class FakeRTCPeerConnection {
 const noopCallbacks = {
   onSignal: () => {},
   onChat: () => {},
+  onDelivered: () => {},
   onControl: () => {},
   onTyping: () => {},
   onRemoteStream: () => {},

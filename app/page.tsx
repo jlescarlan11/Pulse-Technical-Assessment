@@ -12,7 +12,6 @@ import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 import { callSign } from "@/lib/callsign";
 import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
-
 type Conn =
   | { kind: "idle" }
   | { kind: "requesting"; peerId: string }
@@ -93,6 +92,12 @@ export default function Home() {
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
+
+  // ── Origin Story ──
+  // Peer coords set at the moment either party clicks "Connect". Passed to
+  // WorldMap so it flies the camera to frame both dots during the handshake.
+  // Cleared on teardown so the next connection gets a fresh zoom.
+  const [originPeer, setOriginPeer] = useState<{ lat: number; lng: number } | null>(null);
 
   const [conn, _setConn] = useState<Conn>({ kind: "idle" });
   const connRef = useRef<Conn>(conn);
@@ -237,15 +242,23 @@ export default function Home() {
     returnFocusToMain();
   }, [actionNonce]);
 
-  function addMessage(mine: boolean, text: string) {
+  function addMessage(mine: boolean, text: string): number {
     // createdAt is a CLIENT-ONLY wall-clock stamp (Date.now(), ms epoch) read
     // solely by ChatPanel's Fade Trails decay. It is NOT sent over the wire,
     // NOT persisted, and does NOT change a message's real lifetime — messages
     // stay in-memory and are cleared on teardown.
+    //
+    // Delivery Echo: allocate the id BEFORE the setMessages closure so we can
+    // return it. The outbound send rides this SAME id on the wire ({t:"msg",
+    // id}); the peer echoes it back in an ack and onDelivered flips this exact
+    // message to Delivered by id. id is monotonic & session-local, never sent
+    // for incoming-tagging purposes beyond this.
+    const id = msgId.current++;
     setMessages((prev) => [
       ...prev,
-      { id: msgId.current++, mine, text, createdAt: Date.now() },
+      { id, mine, text, createdAt: Date.now() },
     ]);
+    return id;
   }
 
   // Token-aware signal sender. Pulls the current token from the ref, and on a
@@ -319,6 +332,7 @@ export default function Home() {
     resetPresence();
     setPeerTyping(false);
     setMessages([]);
+    setOriginPeer(null);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
   }
@@ -339,6 +353,25 @@ export default function Home() {
             // A real message means they have stopped typing.
             setPeerTyping(false);
             addMessage(false, text);
+          },
+          onDelivered: (id) => {
+            // Delivery Echo (Story C): flip exactly the matching OUTBOUND
+            // message to delivered, matched BY ID (not array position). Pure
+            // functional update keyed on id makes it idempotent — a duplicate,
+            // stale, or foreign ack maps to an already-delivered or non-matching
+            // message and returns prev unchanged, so no re-render / re-animate.
+            // Order-independent: rapid-fire acks each land on their own id.
+            setMessages((prev) => {
+              let changed = false;
+              const next = prev.map((m) => {
+                if (m.id === id && m.mine && !m.delivered) {
+                  changed = true;
+                  return { ...m, delivered: true };
+                }
+                return m;
+              });
+              return changed ? next : prev;
+            });
           },
           onControl: (ctrl) => handleControl(ctrl),
           onTyping: (on) => setPeerTyping(on),
@@ -437,6 +470,8 @@ export default function Home() {
     if (connRef.current.kind !== "incoming") return;
     if (incomingTimer.current) clearTimeout(incomingTimer.current);
     const peerId = connRef.current.peerId;
+    const incomingPeer = peers.find((p) => p.id === peerId);
+    if (incomingPeer) setOriginPeer({ lat: incomingPeer.lat, lng: incomingPeer.lng });
     void startPeer(peerId, false);
     void emitSignal(peerId, "accept");
     setConn({ kind: "connecting", peerId });
@@ -554,6 +589,10 @@ export default function Home() {
           if (requestTimer.current) clearTimeout(requestTimer.current);
           void startPeer(sig.fromId, true);
           setConn({ kind: "connecting", peerId: sig.fromId });
+          // Zoom fires for the initiator only now — when the OTHER party accepts.
+          // Mirrors the moment acceptIncoming() fires setOriginPeer for the recipient.
+          const acceptedPeer = peers.find((p) => p.id === sig.fromId);
+          if (acceptedPeer) setOriginPeer({ lat: acceptedPeer.lat, lng: acceptedPeer.lng });
         }
         break;
       }
@@ -825,7 +864,10 @@ export default function Home() {
     return <EntryGate onReady={handleReady} />;
   }
 
-  const inChat = conn.kind === "connecting" || conn.kind === "connected";
+  // ChatPanel only mounts once the data channel is open. During the "connecting"
+  // handshake, WorldMap stays visible (Origin Story zoom plays) and a "Connecting…"
+  // pill shows so the user knows something is happening.
+  const inChat = conn.kind === "connected";
   const activePeerId = conn.kind !== "idle" ? conn.peerId : undefined;
 
   return (
@@ -833,10 +875,15 @@ export default function Home() {
     // Block→Undo toast is dismissed/timed-out — see returnFocusToMain (M1).
     <main ref={mainRef} tabIndex={-1} className="fixed inset-0 overflow-hidden outline-none">
       <WorldMap
-        peers={peers}
+        peers={
+          conn.kind === "connecting" || conn.kind === "connected"
+            ? peers.filter((p) => p.id === activePeerId)
+            : peers
+        }
         me={myLocation}
         onPeerClick={requestConnection}
         canConnect={conn.kind === "idle"}
+        originPeer={originPeer}
       />
 
       {/* Z-TIER (M6): status messaging always sits ABOVE modals/panels.
@@ -978,6 +1025,19 @@ export default function Home() {
         </div>
       )}
 
+      {conn.kind === "connecting" && (
+        <div
+          role="status"
+          className="animate-pill-in glass absolute left-1/2 top-20 z-50 flex -translate-x-1/2 items-center gap-3 rounded-full py-2 pl-4 pr-2 text-sm text-haze-100"
+        >
+          <span className="relative flex h-2 w-2">
+            <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-signal opacity-70" />
+            <span className="relative inline-flex h-2 w-2 rounded-full bg-signal" />
+          </span>
+          <span>Connecting…</span>
+        </div>
+      )}
+
       {conn.kind === "incoming" && (
         <ConnectionPrompt
           title="A stranger is reaching out"
@@ -997,8 +1057,19 @@ export default function Home() {
           connected={conn.kind === "connected"}
           videoBusy={video !== "none"}
           onSend={(text) => {
-            peerRef.current?.sendChat(text);
-            addMessage(true, text);
+            // Delivery Echo: append locally first so we own the id, then send
+            // that SAME id on the wire. The peer's ack echoes it back and flips
+            // this message to Delivered (onDelivered, by id). sendChat returns
+            // whether the frame actually went out over an open channel — only
+            // then do we mark the message "Sent" (honest: a no-op'd send on a
+            // closed channel claims nothing).
+            const id = addMessage(true, text);
+            const sent = peerRef.current?.sendChat(text, id) ?? false;
+            if (sent) {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === id ? { ...m, sent: true } : m)),
+              );
+            }
           }}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
@@ -1044,6 +1115,7 @@ export default function Home() {
           localAway={localAway}
         />
       )}
+
     </main>
   );
 }

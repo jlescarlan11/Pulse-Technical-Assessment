@@ -23,6 +23,11 @@ export interface TurnCredentialsResponse {
 interface PeerCallbacks {
   onSignal: (type: DescType, payload: string) => void;
   onChat: (text: string) => void;
+  // Delivery Echo. Fired when the peer's client acks a message WE sent — the
+  // honest "Delivered" signal. Carries the sender-local message id (echoed back
+  // in the {t:"ack", id} frame) so the caller flips the matching outbound
+  // message by id, not array position. P2P-only, never touches the server.
+  onDelivered: (id: number) => void;
   onControl: (ctrl: PeerControl) => void;
   // Phase 4 typing indicator. Fired when the peer's typing state flips. Rides
   // the existing data channel via a {t:"typing", on} message — fully ephemeral,
@@ -208,7 +213,25 @@ export class PeerSession {
             this.chatFloodClamp = createInboundChatBucket();
           if (this.chatFloodClamp.tryRemove()) {
             this.cb.onChat(msg.text);
+            // Delivery Echo (Story B): ack ONLY after the clamp passed AND the
+            // message was actually handed to onChat — i.e. it really reached
+            // (and rendered on) this client. A dropped (clamped) message sends
+            // NO ack, so it honestly stays at "Sent" on the sender. Acked only
+            // when the inbound frame carried an id (older id-less peers get no
+            // ack, mirroring the unknown-type bypass — forward/backward compat).
+            // Number.isInteger rejects NaN/Infinity/floats — ids are always the
+            // sender's small monotonic integer counter, so a non-integer id is a
+            // malformed/hostile frame and gets no ack.
+            if (Number.isInteger(msg.id)) {
+              this.sendAck(msg.id);
+            }
           }
+        } else if (msg.t === "ack" && Number.isInteger(msg.id)) {
+          // EXEMPT from the flood clamp by design (hard requirement): acks ride
+          // their own branch alongside ctrl/typing and never touch the t:"msg"
+          // bucket. Clamping acks would falsely strand delivered messages at
+          // "Sent". This fires onDelivered with the sender-local id echoed back.
+          this.cb.onDelivered(msg.id);
         } else if (msg.t === "ctrl" && typeof msg.ctrl === "string") {
           this.cb.onControl(msg.ctrl as PeerControl);
         } else if (msg.t === "typing" && typeof msg.on === "boolean") {
@@ -268,8 +291,22 @@ export class PeerSession {
     }
   }
 
-  sendChat(text: string) {
-    this.safeSend({ t: "msg", text });
+  // Delivery Echo (Story A): the message carries the sender's LOCAL msgId so the
+  // peer can echo it back in an ack and we can flip exactly that outbound
+  // message to "Delivered" by id. id is always sent by this build; an older
+  // peer that ignores it still renders the text fine (text is unchanged).
+  // Returns whether the frame actually went out (channel open). The caller uses
+  // this to mark the message "Sent" honestly — a no-op'd send on a closed
+  // channel returns false and is never shown as Sent.
+  sendChat(text: string, id: number): boolean {
+    return this.safeSend({ t: "msg", text, id });
+  }
+
+  // Delivery Echo (Story B): echo the received message's id straight back as a
+  // bare ack frame. safeSend no-ops on a closed channel; the receive side keeps
+  // this frame OUT of the flood clamp (its own dispatch branch above).
+  sendAck(id: number): void {
+    this.safeSend({ t: "ack", id });
   }
 
   sendControl(ctrl: PeerControl) {
@@ -283,10 +320,12 @@ export class PeerSession {
     this.safeSend({ t: "typing", on });
   }
 
-  private safeSend(obj: unknown) {
+  private safeSend(obj: unknown): boolean {
     if (this.dc && this.dc.readyState === "open") {
       this.dc.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   }
 
   // Starts the camera and wires up the clone-and-gate split.
