@@ -227,6 +227,17 @@ describe("Delivery Echo — backward compatibility (id-less peer)", () => {
     expect(onChat).toHaveBeenCalledWith("x");
     expect(channel.send).not.toHaveBeenCalled();
   });
+
+  it("a non-INTEGER id (float) on an inbound chat -> delivered, but still no ack", () => {
+    // Same Number.isInteger guard on the echo path: a malformed float id renders
+    // the message but is never echoed back as an ack.
+    const { channel, onChat } = sessionWithChannel();
+
+    deliver(channel, '{"t":"msg","text":"y","id":2.5}');
+
+    expect(onChat).toHaveBeenCalledWith("y");
+    expect(channel.send).not.toHaveBeenCalled();
+  });
 });
 
 // --- AC5: inbound ack drives onDelivered, and acks are clamp-EXEMPT ----------
@@ -295,6 +306,18 @@ describe("Delivery Echo — malformed acks ignored", () => {
     deliver(channel, JSON.stringify({ t: "ack", id: "42" }));
     deliver(channel, JSON.stringify({ t: "ack", id: null }));
     deliver(channel, JSON.stringify({ t: "ack", id: { n: 1 } }));
+
+    expect(onDelivered).not.toHaveBeenCalled();
+  });
+
+  it("inbound {t:'ack', id} with a NON-INTEGER number (float) -> onDelivered NOT called", () => {
+    // ids are always the sender's small monotonic integer counter, so the guard
+    // is Number.isInteger, NOT typeof === "number". A float is the realistic
+    // non-integer that survives JSON.parse (NaN/Infinity aren't JSON-
+    // representable) and the old typeof guard would have wrongly accepted it.
+    const { channel, onDelivered } = sessionWithChannel();
+
+    deliver(channel, '{"t":"ack","id":3.5}');
 
     expect(onDelivered).not.toHaveBeenCalled();
   });

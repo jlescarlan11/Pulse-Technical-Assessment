@@ -219,11 +219,14 @@ export class PeerSession {
             // NO ack, so it honestly stays at "Sent" on the sender. Acked only
             // when the inbound frame carried an id (older id-less peers get no
             // ack, mirroring the unknown-type bypass — forward/backward compat).
-            if (typeof msg.id === "number") {
+            // Number.isInteger rejects NaN/Infinity/floats — ids are always the
+            // sender's small monotonic integer counter, so a non-integer id is a
+            // malformed/hostile frame and gets no ack.
+            if (Number.isInteger(msg.id)) {
               this.sendAck(msg.id);
             }
           }
-        } else if (msg.t === "ack" && typeof msg.id === "number") {
+        } else if (msg.t === "ack" && Number.isInteger(msg.id)) {
           // EXEMPT from the flood clamp by design (hard requirement): acks ride
           // their own branch alongside ctrl/typing and never touch the t:"msg"
           // bucket. Clamping acks would falsely strand delivered messages at
