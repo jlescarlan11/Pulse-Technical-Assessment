@@ -597,39 +597,34 @@ export default function ChatPanel({
               >
                 {m.text}
                 {/* Delivery Echo (Story D): a QUIET resting indicator under our
-                    own messages. "Sent" is the calm, COMPLETE default — plain
-                    text, no spinner, no "pending", no warning colour. Delivered
-                    is an additive upgrade: a subtle check glyph + label, NOT the
-                    removal of an alarm. Sent vs Delivered is distinguished by
-                    ICON + TEXT, never colour alone (the app's AA discipline),
-                    both reading in muted ink against the opaque signal fill so
-                    they stay legible even when Fade Trails has dimmed the bubble
-                    (the indicator rides the same decayed span). No motion of its
-                    own — the swap is an instantaneous content change, which is
-                    reduced-motion-safe by construction. */}
-                {m.mine && (
-                <span className="mt-1 flex items-center justify-end gap-1 text-[0.625rem] leading-none text-ink-950/55">
-                  {m.delivered ? (
-                    <>
-                      <svg
-                        className="h-3 w-3"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        aria-hidden
-                      >
-                        <path
-                          d="m5 13 4 4L19 7"
-                          stroke="currentColor"
-                          strokeWidth="2.2"
-                          strokeLinecap="round"
-                          strokeLinejoin="round"
-                        />
-                      </svg>
-                      <span>Delivered</span>
-                    </>
-                  ) : (
-                    <span>Sent</span>
-                  )}
+                    own messages. Delivered-only — "Sent" is intentionally
+                    implicit: at rest there is NO label (a bubble's mere presence
+                    says "sent"), the calmest resting state and one that can't
+                    read as "pending". Delivered is then a true additive upgrade:
+                    a subtle check glyph + label, NOT the removal of an alarm. It
+                    is distinguished by ICON + TEXT, never colour alone (the app's
+                    AA discipline), reading in muted ink against the opaque signal
+                    fill so it stays legible even when Fade Trails has dimmed the
+                    bubble (the indicator rides the same decayed span). No motion
+                    of its own — the swap is an instantaneous content change,
+                    which is reduced-motion-safe by construction. */}
+                {m.mine && m.delivered && (
+                <span className="mt-1 flex items-center justify-end gap-1 font-mono text-[0.6875rem] uppercase leading-none tracking-[0.18em] text-ink-950/80">
+                  <svg
+                    className="h-3 w-3"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    aria-hidden
+                  >
+                    <path
+                      d="m5 13 4 4L19 7"
+                      stroke="currentColor"
+                      strokeWidth="2.2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                  <span>Delivered</span>
                 </span>
                 )}
               </span>

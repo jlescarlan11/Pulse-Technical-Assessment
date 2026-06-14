@@ -4,10 +4,11 @@
  * ChatPanel — Delivery Echo (the honest per-message delivery indicator).
  *
  * Behaviour under test (observable text / roles, never internals):
- *   - An outbound (mine) message renders "Sent" at rest (the CALM, COMPLETE
- *     default — not "pending") and, once its `delivered` flips true, renders
- *     "Delivered". Sent vs Delivered is icon + text; there is NO spinner /
- *     progressbar (the indicator never implies an in-flight wait).
+ *   - An outbound (mine) message shows NO label at rest (Delivered-only: a
+ *     bubble's mere presence is the calmest "sent", and an absent label can't
+ *     read as "pending") and, once its `delivered` flips true, renders
+ *     "Delivered" (icon + text). There is NO spinner / progressbar (the
+ *     indicator never implies an in-flight wait).
  *   - Incoming (mine:false) messages carry NEITHER label — the indicator is for
  *     OUR messages only.
  *   - A polite sr-only live region announces "Message delivered" exactly when
@@ -66,27 +67,30 @@ function incoming(over: Partial<ChatMessage> = {}): ChatMessage {
   return { id: 2, mine: false, text: "their message", createdAt: NOW, ...over };
 }
 
-// --- AC7: undelivered outbound -> "Sent", not "Delivered", no spinner -------
+// --- AC7: undelivered outbound -> NO label at rest (Delivered-only) ----------
 
-describe("ChatPanel Delivery Echo — Sent (resting) state", () => {
-  it("an outbound message with delivered falsy renders 'Sent' and NOT 'Delivered'", () => {
+describe("ChatPanel Delivery Echo — resting (pre-ack) state has no label", () => {
+  it("an outbound message with delivered falsy renders NEITHER 'Sent' nor 'Delivered'", () => {
     renderPanel({ messages: [mine({ delivered: false })] });
 
-    expect(screen.getByText("Sent")).toBeInTheDocument();
+    expect(screen.getByText("my message")).toBeInTheDocument();
+    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
   });
 
-  it("an outbound message with delivered undefined (the default) also renders 'Sent'", () => {
+  it("an outbound message with delivered undefined (the default) also shows no label", () => {
     renderPanel({ messages: [mine()] });
 
-    expect(screen.getByText("Sent")).toBeInTheDocument();
+    expect(screen.getByText("my message")).toBeInTheDocument();
+    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
   });
 
-  it("the resting indicator is NOT a spinner/progressbar — it implies no in-flight wait", () => {
+  it("the resting state is NOT a spinner/progressbar — it implies no in-flight wait", () => {
     renderPanel({ messages: [mine({ delivered: false })] });
 
-    // "Sent" is a complete state; there is no loading affordance.
+    // The resting state is a complete sent message (no label at all); there is
+    // no loading affordance of any kind.
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(screen.queryByRole("status", { busy: true })).not.toBeInTheDocument();
   });
@@ -136,7 +140,7 @@ describe("ChatPanel Delivery Echo — incoming messages have no indicator", () =
 // --- AC10: polite live-region announcement on the delivered transition ------
 
 describe("ChatPanel Delivery Echo — polite 'Message delivered' announcement", () => {
-  it("does NOT announce for a message resting at 'Sent'", () => {
+  it("does NOT announce for a resting (undelivered) message", () => {
     renderPanel({ messages: [mine({ delivered: false })] });
 
     // The live region exists but stays empty while nothing has been delivered.
@@ -181,23 +185,24 @@ describe("ChatPanel Delivery Echo — polite 'Message delivered' announcement", 
 // --- HONESTY: no timeout path to "Delivered" --------------------------------
 
 describe("ChatPanel Delivery Echo — NO fake-advance to Delivered (honesty)", () => {
-  it("advancing timers does NOT flip a Sent message to Delivered (an ack is the sole path)", () => {
+  it("advancing timers does NOT flip an unacked message to Delivered (an ack is the sole path)", () => {
     jest.useFakeTimers();
     try {
       // A live, unacked outbound message. The Fade Trails shared ticker and any
       // other timers run, but none of them may invent a delivery.
       renderPanel({ messages: [mine({ delivered: false })] });
 
-      expect(screen.getByText("Sent")).toBeInTheDocument();
+      // No label at rest, and crucially nothing claiming delivery.
+      expect(screen.getByText("my message")).toBeInTheDocument();
+      expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
 
       act(() => {
         // Advance far past any plausible UI timeout (Fade Trails decay is 90s).
         jest.advanceTimersByTime(120_000);
       });
 
-      // Still "Sent". No timer fabricated a "Delivered" — only a real ack
+      // Still undelivered. No timer fabricated a "Delivered" — only a real ack
       // (a delivered prop flip) may do that.
-      expect(screen.getByText("Sent")).toBeInTheDocument();
       expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
       expect(screen.queryByText("Message delivered")).not.toBeInTheDocument();
     } finally {
