@@ -12,6 +12,18 @@ import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 import { callSign } from "@/lib/callsign";
 import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
+import OriginStoryOverlay from "./components/OriginStoryOverlay";
+import { peerColor } from "@/lib/peerColor";
+
+// Read the live OS/browser reduced-motion preference. Used to gate Origin Story
+// (a JS-animated Mapbox sequence) the same way WorldMap gates its camera moves.
+function prefersReducedMotion(): boolean {
+  return (
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia("(prefers-reduced-motion: reduce)").matches
+  );
+}
 
 type Conn =
   | { kind: "idle" }
@@ -93,6 +105,15 @@ export default function Home() {
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
+
+  // ── Origin Story ──
+  const originStoryShownRef = useRef(false);
+  const [showOriginStory, setShowOriginStory] = useState(false);
+  const [originPeerCoords, setOriginPeerCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [originPeerColor, setOriginPeerColor] = useState("");
+  const originPeerCoordsRef = useRef<{ lat: number; lng: number } | null>(null);
+  const originPeerColorRef = useRef("");
+  const myLocationRef = useRef<{ lat: number; lng: number } | null>(null);
 
   const [conn, _setConn] = useState<Conn>({ kind: "idle" });
   const connRef = useRef<Conn>(conn);
@@ -327,6 +348,10 @@ export default function Home() {
     resetPresence();
     setPeerTyping(false);
     setMessages([]);
+    setShowOriginStory(false);
+    originStoryShownRef.current = false;
+    originPeerCoordsRef.current = null;
+    originPeerColorRef.current = "";
     setConn({ kind: "idle" });
     if (message) showNotice(message);
   }
@@ -377,6 +402,17 @@ export default function Home() {
           },
           onChannelOpen: () => {
             setConn({ kind: "connected", peerId });
+            if (
+              !originStoryShownRef.current &&
+              myLocationRef.current &&
+              originPeerCoordsRef.current &&
+              !prefersReducedMotion()
+            ) {
+              originStoryShownRef.current = true;
+              setOriginPeerCoords(originPeerCoordsRef.current);
+              setOriginPeerColor(originPeerColorRef.current);
+              setShowOriginStory(true);
+            }
           },
         },
         iceConfig,
@@ -440,6 +476,11 @@ export default function Home() {
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
+    const clickedPeer = peers.find((p) => p.id === peerId);
+    if (clickedPeer) {
+      originPeerCoordsRef.current = { lat: clickedPeer.lat, lng: clickedPeer.lng };
+      originPeerColorRef.current = peerColor(clickedPeer.id);
+    }
     setConn({ kind: "requesting", peerId });
     void emitSignal(peerId, "request");
     requestTimer.current = setTimeout(() => {
@@ -464,6 +505,11 @@ export default function Home() {
     if (connRef.current.kind !== "incoming") return;
     if (incomingTimer.current) clearTimeout(incomingTimer.current);
     const peerId = connRef.current.peerId;
+    const incomingPeer = peers.find((p) => p.id === peerId);
+    if (incomingPeer) {
+      originPeerCoordsRef.current = { lat: incomingPeer.lat, lng: incomingPeer.lng };
+      originPeerColorRef.current = peerColor(incomingPeer.id);
+    }
     void startPeer(peerId, false);
     void emitSignal(peerId, "accept");
     setConn({ kind: "connecting", peerId });
@@ -843,6 +889,7 @@ export default function Home() {
   async function handleReady(lat: number, lng: number) {
     setMyLocation({ lat, lng });
     locationRef.current = { lat, lng };
+    myLocationRef.current = { lat, lng };
     const { token } = await join(sessionId, lat, lng);
     tokenRef.current = token;
     setPhase("live");
@@ -1080,6 +1127,18 @@ export default function Home() {
           onEnd={endVideo}
           peerAway={peerAway}
           localAway={localAway}
+        />
+      )}
+
+      {showOriginStory && myLocation && originPeerCoords && (
+        <OriginStoryOverlay
+          me={myLocation}
+          peer={originPeerCoords}
+          peerColor={originPeerColor}
+          onDismiss={() => {
+            setShowOriginStory(false);
+            mainRef.current?.focus();
+          }}
         />
       )}
     </main>
