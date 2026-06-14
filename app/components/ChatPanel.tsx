@@ -601,15 +601,18 @@ export default function ChatPanel({
                     implicit: at rest there is NO label (a bubble's mere presence
                     says "sent"), the calmest resting state and one that can't
                     read as "pending". Delivered is then a true additive upgrade:
-                    a subtle check glyph + label, NOT the removal of an alarm. It
-                    is distinguished by ICON + TEXT, never colour alone (the app's
-                    AA discipline), reading in muted ink against the opaque signal
-                    fill so it stays legible even when Fade Trails has dimmed the
-                    bubble (the indicator rides the same decayed span). No motion
-                    of its own — the swap is an instantaneous content change,
-                    which is reduced-motion-safe by construction. */}
+                    a single subtle check glyph (no word), reading in muted ink
+                    against the opaque signal fill so it stays legible even when
+                    Fade Trails has dimmed the bubble (the indicator rides the
+                    same decayed span). The check is a non-text mark (>3:1, fine);
+                    a visually-hidden "Delivered" keeps the per-message state in
+                    the a11y tree (honest meaning = "reached the peer's client",
+                    never "read"/"seen") so screen-reader users aren't left with a
+                    bare, unlabelled glyph. No motion of its own — the swap is an
+                    instantaneous content change, reduced-motion-safe by
+                    construction. */}
                 {m.mine && m.delivered && (
-                <span className="mt-1 flex items-center justify-end gap-1 font-mono text-[0.6875rem] uppercase leading-none tracking-[0.18em] text-ink-950/80">
+                <span className="mt-1 flex items-center justify-end text-ink-950/80">
                   <svg
                     className="h-3 w-3"
                     viewBox="0 0 24 24"
@@ -624,7 +627,7 @@ export default function ChatPanel({
                       strokeLinejoin="round"
                     />
                   </svg>
-                  <span>Delivered</span>
+                  <span className="sr-only">Delivered</span>
                 </span>
                 )}
               </span>
