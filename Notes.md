@@ -1189,3 +1189,92 @@ Both features ran the full subagent pipeline: `project-manager` → `stakeholder
 - **Tunable rate params** are already a single constant; a future toggle could expose a stricter/looser tier.
 
 **Phase 4 (continued) deliverable:** Two honest abuse-resistance features for anonymous 1:1 — a **receiver-side chat flood clamp** that protects the render path without ever starving the video-presence shield and is honest across two clocks, and **Block & Next**, which refuses a peer for the session, removes them from your map, and silently declines their return — paired with a clear-eyed decision *not* to build a server-side block that would look stronger than it is. The arc's real deliverable is the **judgment**: recognizing which "anti-abuse" features the P2P/no-persistence architecture can honestly deliver, and declining the theater.
+
+---
+---
+
+# Phase 4 (continued): Make It Navigable — Map Controls
+
+**Status:** Complete (built after the Block & Next arc above, on `feature/phase-4-map-controls`)
+**Scope:** A top-right glass control cluster on the Mapbox map (`app/components/WorldMap.tsx`). Four native buttons — zoom in / out, recenter on me, frame all signals. Frontend-only: no API, no schema, no signaling change; it drives the *camera*, nothing else.
+
+---
+
+## The Brief & The Thinking
+
+The map is the hero surface, but until now the only way to move it was a wheel/pinch/drag — a pure pointer gesture. That's an obvious gap for a HUD this central, but the *honest* framing matters and shaped the whole feature.
+
+**The accessibility claim is deliberately narrow.** The zoom buttons help low-vision, motor, and no-scroll-wheel users *zoom the map*. They **do not** add a new path for the **core connect task** — that was already solved in the Phase 4 UI/UX pass, where the keyboard-navigable **"nearby signals"** disclosure list (the bottom-left count chip) became the non-spatial way to reach a stranger. So these controls make the map *navigable*; they don't make it *connectable* (it already was). We say that plainly rather than dressing a zoom button up as an accessibility win it isn't.
+
+---
+
+## What Shipped (four controls)
+
+A vertical glass stack in the **top-right** — the only HUD corner left free, by elimination: the brand mark owns top-left, the coach hint sits top-center (`left-1/2`), the presence chip is bottom-left, and Mapbox attribution is bottom-right. It mounts only when `TOKEN && ready`, like the rest of the map-dependent UI.
+
+- **Zoom in / Zoom out** — hand-rolled glass buttons that drive Mapbox's own `zoomIn()` / `zoomOut()`. Each goes **`aria-disabled` at its zoom bound** (zoom-in at max, zoom-out at min) and the handler no-ops there; the bound flags are synced off the map's live `"zoom"` event (compared against a small epsilon, because Mapbox lands fractionally short of the exact min/max after a wheel or pinch).
+- **Recenter on me** — flies the camera back to the "You are here" pin at `ME_ZOOM` (4 — "your neighbourhood of the world", the same altitude the map opens at). **`aria-disabled`, not hidden,** until a location fix lands; the `me`-live closure enables it the instant a fix arrives, no remount.
+- **Frame all signals** — fit-bounds to show every peer dot at once. **`aria-disabled` when there are no peers.**
+
+### Why hand-rolled, not Mapbox's `NavigationControl`
+
+`NavigationControl` would have dragged in a compass and white control chrome that clashes head-on with the "Signal in the Dark" dark-glass HUD. Hand-rolling the buttons keeps them in the HUD's own vocabulary (glass, `:focus-visible` ring, spring press) and lets us own the disabled state and the reduced-motion behaviour — both of which the native control doesn't give us. We still delegate the *zoom math* to Mapbox (`zoomIn`/`zoomOut` respect min/max internally, so they never throw at a bound); only the chrome is ours.
+
+### Frame peers-only (the own pin is excluded — on purpose)
+
+`frameAllSignals` fits the bounds over **peers only**; the user's own `me` pin is deliberately left out, so the frame answers "where are the souls?", not "what's on my screen?". Recenter already serves "take me to *me*", so duplicating the user's own position into the frame would only loosen it. The single-peer / coincident-points case has no spatial spread, so a naive `fitBounds` would slam to max zoom and read as broken — it's **clamped to `FRAME_MAX_ZOOM`** (= `ME_ZOOM`) so it lands at the same comfortable altitude as Recenter (a stakeholder tripwire, locked with a test).
+
+---
+
+## The Two Non-Obvious Correctnesses (both surfaced by QA)
+
+These are the parts worth recording, because both are invisible until the exact edge hits — and both were caught in QA and fixed before merge.
+
+### Reduced motion is respected at the JS-camera level (not in CSS)
+
+The `globals.css` `prefers-reduced-motion` block stills *CSS* motion — but it **does not govern Mapbox's camera**, which animates in **JS**, not via CSS transitions. So a reduced-motion user would still get a swooping `flyTo`. The fix lives in the control logic: a `prefersReducedMotion()` helper reads the live preference at the moment of each camera move, and we branch ourselves — **`flyTo` → `jumpTo`** for Recenter, and **`animate: false`** on the fit-bounds. The preference is read *per move* (not cached at mount) so toggling the OS setting mid-session is honoured.
+
+### Antimeridian-aware framing (BUG-4)
+
+A naive `LngLatBounds` over raw peer longitudes spanning the 180/−180 seam (say, +179 and −179) reads as a **358° span**, so `fitBounds` zooms out around the whole globe **the long way**. The fix: unwrap each longitude to the **shortest arc** relative to the first peer (Mapbox accepts longitudes outside `[-180, 180]` and renders the short way), so date-line-straddling peers frame *tightly* instead of showing the entire planet. Latitude is unaffected.
+
+---
+
+## Accessibility Details
+
+- **Native `<button>`s** throughout — keyboard-operable (Enter/Space) and exposed in the controls `role="group"` ("Map controls") with accessible names ("Zoom in", "Zoom out", "Recenter on me", "Frame all signals").
+- **44px hit areas** (`h-11 w-11`) with a small inner glyph, meeting the touch-target minimum.
+- **`aria-disabled`, not the native `disabled` attribute (BUG-5).** The unavailable state still *reaches assistive tech* (AT announces the control as dimmed/unavailable) and the handler no-ops, so the map never jitters past a hard stop — **but the button stays focusable and in the tab order.** This is the deliberate fix for a real-browser focus bug: a control that takes the native `disabled` attribute **while it holds keyboard focus** makes the browser **synchronously** blur it to `<body>`, ejecting the keyboard user from the cluster. (We first tried a focus-*rescue* — capture intent, redirect to the sibling — but the browser's blur-on-disable fires React's `onBlur`, which cleared the captured intent *before* the rescue effect ran; it only "worked" under jsdom, which doesn't auto-blur on disable. `aria-disabled` sidesteps the whole race: the button never disables natively, so focus is never taken in the first place.)
+- **The global `:focus-visible` ring** is inherited, so keyboard focus is always visible.
+
+---
+
+## How We Worked & Verification
+
+Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `frontend-engineer` → `ui-ux-critic` → engineer fixes → `test-engineer` → `code-reviewer` → `qa-engineer`. **QA surfaced both edge bugs** — the antimeridian long-way zoom (BUG-4) and the focus ejection at a zoom bound (BUG-5) — which were fixed before merge. BUG-5 took two passes: a focus-rescue attempt that a test-engineer investigation proved only worked under jsdom (the real-browser blur-on-disable fires `onBlur` before the rescue effect), which is what drove the move to `aria-disabled` — the cure that removes the race entirely.
+
+- **Tests: 188 → 206 (+18)**, the **first component-level coverage of `WorldMap`'s controls** (`app/components/WorldMap.test.tsx`, jsdom-scoped, mapbox-gl mocked). The mock stores the `"zoom"` handler so a test can adjust the reported zoom and emit, exposes the camera methods as spies, and tunes `getZoom/getMinZoom/getMaxZoom`. Coverage includes the four buttons' camera calls, the `aria-disabled`-at-bound flags, the no-op-at-bound guard, the **focus-stays-put** proof (focus is *not* lost when a focused zoom button reaches its bound — the BUG-5 regression), the `flyTo`-vs-`jumpTo` reduced-motion branch, the peers-only frame, and the antimeridian shortest-arc (BUG-4 regression). `tsc` clean, lint clean, build clean.
+
+---
+
+## Phase 4 (continued) Change Summary
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `WorldMap.tsx` — controls cluster | Top-right glass stack of four native buttons (`role="group"`); mounts on `TOKEN && ready` | Top-right is the only HUD corner free of the brand mark, coach hint, presence chip, and attribution; HUD-native chrome, not Mapbox's white `NavigationControl` |
+| `WorldMap.tsx` — zoom in / out | Drive Mapbox `zoomIn`/`zoomOut`; `aria-disabled` + handler no-op at the bound, synced off the live `"zoom"` event (epsilon-compared) | Helps low-vision / motor / no-wheel users zoom — it does **not** add a new *connect* path (the nearby-signals list already owns that) |
+| `WorldMap.tsx` — Recenter on me | `flyTo` to the `me` pin at `ME_ZOOM`; `aria-disabled` (not hidden) until a fix lands | "Take me to me" — distinct from framing peers; `me`-live closure enables it without a remount |
+| `WorldMap.tsx` — Frame all signals | `fitBounds` over **peers only** (own pin excluded); clamped to `FRAME_MAX_ZOOM` | "Where are the souls?" not "what's on my screen?"; the clamp keeps the single/coincident-peer case at a sane altitude |
+| `WorldMap.tsx` — reduced motion | `flyTo → jumpTo` and `animate: false` under `prefers-reduced-motion`, read per move | The CSS reduced-motion block does **not** govern Mapbox's JS camera, so it's handled in control logic |
+| `WorldMap.tsx` — antimeridian (BUG-4) | Unwrap longitudes to the shortest arc relative to the first peer | Date-line-straddling peers frame tightly instead of zooming out around the whole globe |
+| `WorldMap.tsx` — `aria-disabled` (BUG-5) | At-bound controls go `aria-disabled` (not native `disabled`) and the handler no-ops | A natively-disabled focused element is synchronously blurred to `<body>`, ejecting the keyboard user; `aria-disabled` keeps it focusable so focus is never taken |
+
+**Total:** A four-button map-controls cluster — zoom in/out, recenter, frame-all — hand-rolled in the dark-glass HUD vocabulary, reduced-motion-correct at the JS-camera level, antimeridian-aware, and fully keyboard/AT-operable (`aria-disabled`, not native `disabled`, so focus is never ejected). Frontend-only: **no API route, no schema change, no signaling change**. Tests **188 → 206 (+18)** (first `WorldMap` controls component coverage). `tsc` clean, lint clean, build clean. Full pipeline; QA caught BUG-4 + BUG-5, both fixed before merge.
+**Risk:** Low — additive and read-only against state; it drives the map camera and nothing else, every control is guarded on `mapRef + ready` so a stray activation during teardown is a no-op, and disabled bounds keep it from ever fighting the map.
+
+**What I'd do next (with more time):**
+- **A "frame me + signals" mode** as an optional second framing that *does* include the own pin, for users who want themselves in the shot — kept distinct from the peers-only default so neither overloads one button.
+- **Smooth the zoom-bound disable** with a brief debounce so a fast wheel-then-button sequence never flickers the disabled state.
+- **Surface the controls' keyboard story** in a first-run hint, the way the map already coaches "tap a signal to say hello".
+
+**Phase 4 (continued) deliverable:** A map-controls cluster that makes the hero surface *navigable* without a pointer — zoom, recenter, and frame-all in the HUD's own dark glass — with the honesty held throughout: the zoom buttons help people move the map, they don't pretend to be a new way to *connect* (the keyboard-reachable nearby-signals list already is that). The non-obvious correctnesses — reduced motion at the JS-camera level, the antimeridian shortest-arc, and choosing `aria-disabled` over the native attribute so a keyboard user is never ejected when a control reaches its bound — are the parts that make it actually work for the people the feature is for.
