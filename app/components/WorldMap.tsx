@@ -46,11 +46,13 @@ export default function WorldMap({
   me,
   onPeerClick,
   canConnect,
+  originPeer = null,
 }: {
   peers: PeerDot[];
   me: { lat: number; lng: number } | null;
   onPeerClick: (id: string) => void;
   canConnect: boolean;
+  originPeer?: { lat: number; lng: number } | null;
 }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<MapboxMap | null>(null);
@@ -199,6 +201,39 @@ export default function WorldMap({
       });
     })();
   }, [peers]);
+
+  // Origin Story — fly the camera to frame both dots the moment either party
+  // clicks "Connect". Fires during the WebRTC handshake while the map is still
+  // visible, so the zoom fills the natural wait time instead of an empty screen.
+  // Clears when teardown() sets originPeer back to null.
+  useEffect(() => {
+    if (!originPeer || !me || !ready) return;
+    const map = mapRef.current;
+    if (!map) return;
+    void (async () => {
+      const mapboxgl = (await import("mapbox-gl")).default;
+      if (mapRef.current !== map) return;
+      const reduced = prefersReducedMotion();
+      const samePoint = me.lat === originPeer.lat && me.lng === originPeer.lng;
+      if (samePoint) {
+        const camera = { center: [me.lng, me.lat] as [number, number], zoom: 13 };
+        if (reduced) {
+          map.jumpTo(camera);
+        } else {
+          map.flyTo(camera);
+        }
+      } else {
+        const bounds = new mapboxgl.LngLatBounds();
+        bounds.extend([me.lng, me.lat]);
+        bounds.extend([originPeer.lng, originPeer.lat]);
+        map.fitBounds(bounds, {
+          padding: { top: 96, bottom: 112, left: 84, right: 64 },
+          maxZoom: FRAME_MAX_ZOOM,
+          animate: !reduced,
+        });
+      }
+    })();
+  }, [originPeer, me, ready]);
 
   // Resolve coach visibility once on mount and auto-fade after a few seconds.
   // The show is scheduled (not set synchronously in the effect body) to avoid a
