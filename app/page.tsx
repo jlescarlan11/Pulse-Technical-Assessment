@@ -3,7 +3,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import EntryGate from "./components/EntryGate";
 import WorldMap from "./components/WorldMap";
-import ProximityPulse from "./components/ProximityPulse";
 import ConnectionPrompt from "./components/ConnectionPrompt";
 import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
@@ -839,16 +838,6 @@ export default function Home() {
         onPeerClick={requestConnection}
         canConnect={conn.kind === "idle"}
       />
-
-      {/* Phase 4 "Proximity Pulse" — ambient warmer/colder cue on the lower-
-          right edge. ALWAYS MOUNTED (S3): while a chat panel is up we pass
-          hidden=true so the orb fades out and goes silent instead of unmounting —
-          this preserves the built-up trend state so it returns warm (no pop). It
-          stays visually clear of ChatPanel while hidden. z-30 keeps it below
-          prompts/panels (z-40) and toasts (z-50). Honest by design: derives a
-          TREND from data already on the client — no number, bearing, identity,
-          or per-dot link. */}
-      <ProximityPulse peers={peers} me={myLocation} hidden={inChat} />
 
       {/* Z-TIER (M6): status messaging always sits ABOVE modals/panels.
           ConnectionPrompt + VideoPanel occupy z-40; every transient toast and
