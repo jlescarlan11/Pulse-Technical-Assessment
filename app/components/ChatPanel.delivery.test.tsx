@@ -3,18 +3,18 @@
  *
  * ChatPanel — Delivery Echo (the honest per-message delivery indicator).
  *
- * Behaviour under test (observable text / roles, never internals):
- *   - An outbound (mine) message shows NO label at rest (Delivered-only: a
- *     bubble's mere presence is the calmest "sent", and an absent label can't
- *     read as "pending") and, once its `delivered` flips true, renders
- *     "Delivered" (icon + text). There is NO spinner / progressbar (the
- *     indicator never implies an in-flight wait).
- *   - Incoming (mine:false) messages carry NEITHER label — the indicator is for
- *     OUR messages only.
- *   - A polite sr-only live region announces "Message delivered" exactly when
- *     the delivered count RISES (a real ack landed). A message resting at "Sent"
- *     never announces; a re-render that doesn't raise the delivered count (an
- *     idempotent ack, an unrelated prop change) does NOT re-announce.
+ * Model under test (observable text / roles, never internals):
+ *   - The indicator (Sent → Delivered) appears ONLY under the NEWEST message
+ *     when it is OURS (mine) and actually went out — the Messenger/iMessage
+ *     convention. "Sent" = handed to an open channel (honest; never claimed for
+ *     a no-op'd send on a closed channel). "Delivered" = a real ack arrived.
+ *   - Last-only: an older mine message shows no indicator even if delivered, and
+ *     once the PEER replies (newest message is theirs) the indicator hides
+ *     entirely — their reply is itself proof of receipt.
+ *   - Incoming (mine:false) messages never carry the indicator.
+ *   - A polite live region announces "Message delivered" exactly when the
+ *     delivered count RISES (a real ack landed) — independent of the visible
+ *     last-only rule. An idempotent/no-op re-render does NOT re-announce.
  *
  * HONESTY HARD LINES (the stakeholder's non-negotiables, asserted directly):
  *   - The copy is exactly "Delivered" — never "Read" or "Seen", anywhere.
@@ -67,18 +67,19 @@ function incoming(over: Partial<ChatMessage> = {}): ChatMessage {
   return { id: 2, mine: false, text: "their message", createdAt: NOW, ...over };
 }
 
-// --- AC7: undelivered outbound -> NO label at rest (Delivered-only) ----------
+// --- Sent state: newest mine + sent (not yet acked) -------------------------
 
-describe("ChatPanel Delivery Echo — resting (pre-ack) state has no label", () => {
-  it("an outbound message with delivered falsy renders NEITHER 'Sent' nor 'Delivered'", () => {
-    renderPanel({ messages: [mine({ delivered: false })] });
+describe("ChatPanel Delivery Echo — Sent state", () => {
+  it("the newest mine message that has been sent (not delivered) renders 'Sent'", () => {
+    renderPanel({ messages: [mine({ sent: true })] });
 
-    expect(screen.getByText("my message")).toBeInTheDocument();
-    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+    expect(screen.getByText("Sent")).toBeInTheDocument();
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
   });
 
-  it("an outbound message with delivered undefined (the default) also shows no label", () => {
+  it("a mine message that was NOT sent (closed channel, no-op) and not delivered shows NO label", () => {
+    // sent + delivered both falsy: the send no-op'd, so we honestly claim
+    // nothing — neither "Sent" nor "Delivered".
     renderPanel({ messages: [mine()] });
 
     expect(screen.getByText("my message")).toBeInTheDocument();
@@ -86,28 +87,32 @@ describe("ChatPanel Delivery Echo — resting (pre-ack) state has no label", () 
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
   });
 
-  it("the resting state is NOT a spinner/progressbar — it implies no in-flight wait", () => {
-    renderPanel({ messages: [mine({ delivered: false })] });
+  it("the Sent state is NOT a spinner/progressbar — it implies no in-flight wait", () => {
+    renderPanel({ messages: [mine({ sent: true })] });
 
-    // The resting state is a complete sent message (no label at all); there is
-    // no loading affordance of any kind.
     expect(screen.queryByRole("progressbar")).not.toBeInTheDocument();
     expect(screen.queryByRole("status", { busy: true })).not.toBeInTheDocument();
   });
 });
 
-// --- AC8: delivered outbound -> "Delivered" ---------------------------------
+// --- Delivered state: newest mine + ack -------------------------------------
 
 describe("ChatPanel Delivery Echo — Delivered state", () => {
-  it("an outbound message with delivered:true renders 'Delivered' (not 'Sent')", () => {
-    renderPanel({ messages: [mine({ delivered: true })] });
+  it("a sent message that is delivered renders 'Delivered' (not 'Sent')", () => {
+    renderPanel({ messages: [mine({ sent: true, delivered: true })] });
 
     expect(screen.getByText("Delivered")).toBeInTheDocument();
     expect(screen.queryByText("Sent")).not.toBeInTheDocument();
   });
 
-  it("HONESTY: the delivered copy is exactly 'Delivered' — never 'Read' or 'Seen'", () => {
+  it("delivered shows even if `sent` was never recorded (delivered implies it arrived)", () => {
     renderPanel({ messages: [mine({ delivered: true })] });
+
+    expect(screen.getByText("Delivered")).toBeInTheDocument();
+  });
+
+  it("HONESTY: the delivered copy is exactly 'Delivered' — never 'Read' or 'Seen'", () => {
+    renderPanel({ messages: [mine({ sent: true, delivered: true })] });
 
     expect(screen.getByText("Delivered")).toBeInTheDocument();
     // The over-promising read-receipt language is forbidden everywhere.
@@ -116,10 +121,43 @@ describe("ChatPanel Delivery Echo — Delivered state", () => {
   });
 });
 
-// --- AC9: incoming messages carry neither label -----------------------------
+// --- Last-message-only: the indicator lives only under the newest mine line --
+
+describe("ChatPanel Delivery Echo — shown only under the newest message", () => {
+  it("an older delivered mine message shows NO indicator; only the newest mine line does", () => {
+    renderPanel({
+      messages: [
+        mine({ id: 1, text: "older", sent: true, delivered: true }),
+        mine({ id: 2, text: "newest", sent: true }),
+      ],
+    });
+
+    // The newest (id 2) is sent-not-delivered -> "Sent". The older delivered
+    // line (id 1) is suppressed, so "Delivered" appears nowhere.
+    expect(screen.getByText("Sent")).toBeInTheDocument();
+    expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
+  });
+
+  it("once the PEER replies (newest message is incoming) the indicator hides entirely", () => {
+    renderPanel({
+      messages: [
+        mine({ id: 1, text: "mine", sent: true, delivered: true }),
+        incoming({ id: 2, text: "their reply" }),
+      ],
+    });
+
+    // Newest is the peer's reply -> our indicator hides; their reply is proof
+    // enough. Neither label appears anywhere.
+    expect(screen.getByText("their reply")).toBeInTheDocument();
+    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
+    expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
+  });
+});
+
+// --- Incoming messages never carry the indicator ----------------------------
 
 describe("ChatPanel Delivery Echo — incoming messages have no indicator", () => {
-  it("an incoming (mine:false) message renders NEITHER 'Sent' nor 'Delivered'", () => {
+  it("a lone incoming (mine:false) message renders NEITHER 'Sent' nor 'Delivered'", () => {
     renderPanel({ messages: [incoming()] });
 
     expect(screen.getByText("their message")).toBeInTheDocument();
@@ -127,9 +165,7 @@ describe("ChatPanel Delivery Echo — incoming messages have no indicator", () =
     expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
   });
 
-  it("a delivered flag on an incoming message is still not shown (indicator is mine-only)", () => {
-    // Even if the data carried a stray delivered flag on an incoming line, the
-    // indicator is gated on m.mine, so neither label appears.
+  it("a stray delivered flag on an incoming message is still not shown (mine-only)", () => {
     renderPanel({ messages: [incoming({ delivered: true })] });
 
     expect(screen.queryByText("Sent")).not.toBeInTheDocument();
@@ -137,47 +173,48 @@ describe("ChatPanel Delivery Echo — incoming messages have no indicator", () =
   });
 });
 
-// --- AC10: polite live-region announcement on the delivered transition ------
+// --- Polite live-region announcement on the delivered transition ------------
 
 describe("ChatPanel Delivery Echo — polite 'Message delivered' announcement", () => {
-  it("does NOT announce for a resting (undelivered) message", () => {
-    renderPanel({ messages: [mine({ delivered: false })] });
+  it("does NOT announce for a message resting at 'Sent'", () => {
+    renderPanel({ messages: [mine({ sent: true })] });
 
-    // The live region exists but stays empty while nothing has been delivered.
+    expect(screen.getByText("Sent")).toBeInTheDocument();
     expect(screen.queryByText("Message delivered")).not.toBeInTheDocument();
   });
 
-  it("announces 'Message delivered' when a message FLIPS from Sent to Delivered", () => {
-    const before = [mine({ id: 1, delivered: false })];
-    const { rerender } = renderPanel({ messages: before });
+  it("announces 'Message delivered' and flips the visible label when a message is acked", () => {
+    const { rerender } = renderPanel({ messages: [mine({ id: 1, sent: true })] });
+    expect(screen.getByText("Sent")).toBeInTheDocument();
     expect(screen.queryByText("Message delivered")).not.toBeInTheDocument();
 
     // An ack lands: the same message id flips delivered -> true.
     act(() => {
-      rerender(panel({ messages: [mine({ id: 1, delivered: true })] }));
+      rerender(panel({ messages: [mine({ id: 1, sent: true, delivered: true })] }));
     });
 
     expect(screen.getByText("Message delivered")).toBeInTheDocument();
-    // And the visible bubble indicator agrees.
+    // And the visible indicator agrees: Sent -> Delivered.
     expect(screen.getByText("Delivered")).toBeInTheDocument();
+    expect(screen.queryByText("Sent")).not.toBeInTheDocument();
   });
 
   it("does NOT re-announce on an idempotent re-render where the delivered COUNT does not rise", () => {
-    // Start already-delivered: the announcement reflects the count, which is 1
-    // from the first render and must not re-fire just because we re-render with
-    // the same delivered set (an idempotent/duplicate ack).
-    const delivered = [mine({ id: 1, delivered: true })];
+    const delivered = [mine({ id: 1, sent: true, delivered: true })];
     const { rerender } = renderPanel({ messages: delivered });
 
-    // Re-render with the SAME delivered count (e.g. an unrelated prop tick, or a
-    // duplicate ack that didn't change anything). The count (1) does not rise…
+    // Re-render with the SAME delivered count (e.g. a duplicate ack, or an
+    // unrelated prop tick). The count (1) does not rise…
     act(() => {
-      rerender(panel({ messages: [mine({ id: 1, delivered: true })], peerTyping: true }));
+      rerender(
+        panel({
+          messages: [mine({ id: 1, sent: true, delivered: true })],
+          peerTyping: true,
+        }),
+      );
     });
 
     // …so the polite region is not re-populated by this no-op transition.
-    // (The first render's count rise of 0->1 is the only legitimate announce;
-    // we assert no SPURIOUS announce on a count that merely holds steady.)
     expect(screen.queryByText("Message delivered")).not.toBeInTheDocument();
   });
 });
@@ -185,15 +222,14 @@ describe("ChatPanel Delivery Echo — polite 'Message delivered' announcement", 
 // --- HONESTY: no timeout path to "Delivered" --------------------------------
 
 describe("ChatPanel Delivery Echo — NO fake-advance to Delivered (honesty)", () => {
-  it("advancing timers does NOT flip an unacked message to Delivered (an ack is the sole path)", () => {
+  it("advancing timers does NOT flip a Sent message to Delivered (an ack is the sole path)", () => {
     jest.useFakeTimers();
     try {
-      // A live, unacked outbound message. The Fade Trails shared ticker and any
-      // other timers run, but none of them may invent a delivery.
-      renderPanel({ messages: [mine({ delivered: false })] });
+      // A live, sent-but-unacked outbound message. The Fade Trails shared ticker
+      // and any other timers run, but none of them may invent a delivery.
+      renderPanel({ messages: [mine({ sent: true })] });
 
-      // No label at rest, and crucially nothing claiming delivery.
-      expect(screen.getByText("my message")).toBeInTheDocument();
+      expect(screen.getByText("Sent")).toBeInTheDocument();
       expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
 
       act(() => {
@@ -201,8 +237,9 @@ describe("ChatPanel Delivery Echo — NO fake-advance to Delivered (honesty)", (
         jest.advanceTimersByTime(120_000);
       });
 
-      // Still undelivered. No timer fabricated a "Delivered" — only a real ack
+      // Still "Sent". No timer fabricated a "Delivered" — only a real ack
       // (a delivered prop flip) may do that.
+      expect(screen.getByText("Sent")).toBeInTheDocument();
       expect(screen.queryByText("Delivered")).not.toBeInTheDocument();
       expect(screen.queryByText("Message delivered")).not.toBeInTheDocument();
     } finally {

@@ -295,8 +295,11 @@ export class PeerSession {
   // peer can echo it back in an ack and we can flip exactly that outbound
   // message to "Delivered" by id. id is always sent by this build; an older
   // peer that ignores it still renders the text fine (text is unchanged).
-  sendChat(text: string, id: number) {
-    this.safeSend({ t: "msg", text, id });
+  // Returns whether the frame actually went out (channel open). The caller uses
+  // this to mark the message "Sent" honestly — a no-op'd send on a closed
+  // channel returns false and is never shown as Sent.
+  sendChat(text: string, id: number): boolean {
+    return this.safeSend({ t: "msg", text, id });
   }
 
   // Delivery Echo (Story B): echo the received message's id straight back as a
@@ -317,10 +320,12 @@ export class PeerSession {
     this.safeSend({ t: "typing", on });
   }
 
-  private safeSend(obj: unknown) {
+  private safeSend(obj: unknown): boolean {
     if (this.dc && this.dc.readyState === "open") {
       this.dc.send(JSON.stringify(obj));
+      return true;
     }
+    return false;
   }
 
   // Starts the camera and wires up the clone-and-gate split.

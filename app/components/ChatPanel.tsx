@@ -17,12 +17,18 @@ export interface ChatMessage {
    */
   createdAt: number;
   /**
-   * Delivery Echo: only meaningful for `mine: true` messages. Undefined/false =
-   * "Sent" (the CALM, COMPLETE resting default — not pending). Flipped to true
-   * by page.tsx#onDelivered ONLY when a real ack for this id arrives over the
-   * data channel. There is intentionally NO "undeliverable" state (cut), and
-   * NO timeout-to-delivered: an ack is the sole path to true. Honest meaning =
-   * "reached the peer's client", never "read"/"seen".
+   * Delivery Echo (mine-only). True once the message was actually handed to an
+   * OPEN data channel (page.tsx sets it from sendChat's return). An honest
+   * "Sent" — not a hopeful one: if the channel was closed and the send no-op'd,
+   * this stays falsy and no "Sent" is claimed.
+   */
+  sent?: boolean;
+  /**
+   * Delivery Echo (mine-only). Flipped to true by page.tsx#onDelivered ONLY when
+   * a real ack for this id arrives over the data channel. NO timeout-to-
+   * delivered: an ack is the sole path. Honest meaning = "reached the peer's
+   * client", never "read"/"seen". The indicator (Sent → Delivered) is shown
+   * ONLY under the newest message when it's ours — see the render below.
    */
   delivered?: boolean;
 }
@@ -580,10 +586,19 @@ export default function ChatPanel({
             : reduceMotion
               ? staticDecayOpacity(ageMs, floor)
               : decayOpacity(ageMs, floor);
+          // Delivery Echo: the Sent → Delivered indicator shows ONLY under the
+          // NEWEST message when it's ours and it actually went out — the
+          // Messenger/iMessage convention. Last-only kills the "Sent/Sent/Sent"
+          // drumbeat a per-bubble label would create, and once the PEER replies
+          // (so the newest message is theirs) it hides entirely: their reply is
+          // itself proof of receipt, and a stale label above it would read as
+          // orphaned. "Sent" = handed to an open channel (honest, never claimed
+          // for a no-op'd send); "Delivered" = a real ack arrived (never "read").
+          const showDelivery = m.mine && isNewest && (m.sent || m.delivered);
           return (
             <div
               key={m.id}
-              className={`animate-msg-in flex ${m.mine ? "justify-end" : "justify-start"}`}
+              className={`animate-msg-in flex flex-col ${m.mine ? "items-end" : "items-start"}`}
             >
               <span
                 // opacity only — the text stays in the DOM and the
@@ -596,41 +611,16 @@ export default function ChatPanel({
                 }`}
               >
                 {m.text}
-                {/* Delivery Echo (Story D): a QUIET resting indicator under our
-                    own messages. Delivered-only — "Sent" is intentionally
-                    implicit: at rest there is NO label (a bubble's mere presence
-                    says "sent"), the calmest resting state and one that can't
-                    read as "pending". Delivered is then a true additive upgrade:
-                    a single subtle check glyph (no word), reading in muted ink
-                    against the opaque signal fill so it stays legible even when
-                    Fade Trails has dimmed the bubble (the indicator rides the
-                    same decayed span). The check is a non-text mark (>3:1, fine);
-                    a visually-hidden "Delivered" keeps the per-message state in
-                    the a11y tree (honest meaning = "reached the peer's client",
-                    never "read"/"seen") so screen-reader users aren't left with a
-                    bare, unlabelled glyph. No motion of its own — the swap is an
-                    instantaneous content change, reduced-motion-safe by
-                    construction. */}
-                {m.mine && m.delivered && (
-                <span className="mt-1 flex items-center justify-end text-ink-950/80">
-                  <svg
-                    className="h-3 w-3"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    aria-hidden
-                  >
-                    <path
-                      d="m5 13 4 4L19 7"
-                      stroke="currentColor"
-                      strokeWidth="2.2"
-                      strokeLinecap="round"
-                      strokeLinejoin="round"
-                    />
-                  </svg>
-                  <span className="sr-only">Delivered</span>
-                </span>
-                )}
               </span>
+              {showDelivery && (
+                <span
+                  className={`mt-1 px-1 font-mono text-[10px] uppercase tracking-wider ${
+                    m.delivered ? "text-signal" : "text-haze-400"
+                  }`}
+                >
+                  {m.delivered ? "Delivered" : "Sent"}
+                </span>
+              )}
             </div>
           );
         })}

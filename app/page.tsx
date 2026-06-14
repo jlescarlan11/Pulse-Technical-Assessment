@@ -1026,9 +1026,17 @@ export default function Home() {
           onSend={(text) => {
             // Delivery Echo: append locally first so we own the id, then send
             // that SAME id on the wire. The peer's ack echoes it back and flips
-            // this message to Delivered (onDelivered, by id).
+            // this message to Delivered (onDelivered, by id). sendChat returns
+            // whether the frame actually went out over an open channel — only
+            // then do we mark the message "Sent" (honest: a no-op'd send on a
+            // closed channel claims nothing).
             const id = addMessage(true, text);
-            peerRef.current?.sendChat(text, id);
+            const sent = peerRef.current?.sendChat(text, id) ?? false;
+            if (sent) {
+              setMessages((prev) =>
+                prev.map((m) => (m.id === id ? { ...m, sent: true } : m)),
+              );
+            }
           }}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
