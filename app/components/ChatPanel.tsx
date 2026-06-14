@@ -46,6 +46,15 @@ const COOLDOWN_MIN_MS = 700;
 // dims, never brightens.
 const DECAY_FULL_OPACITY = 1;
 const DECAY_FLOOR_OPACITY = 0.35;
+// S4 — PER-STYLE floor for INCOMING bubbles. Measured WCAG contrast: the "mine"
+// bubble is an OPAQUE signal fill (the map can't bleed through) so it stays
+// readable, but the incoming bubble (text-haze-100 #e1e7f5 on bg-ink-750/80
+// #121a30 at 80% over the translucent .glass panel) composited at the 0.35 floor
+// measures only ~2.7:1 — BELOW AA 4.5:1. Raising the incoming floor to 0.55
+// lifts the composited text to ~4.8–5.0:1 across the realistic backdrop range
+// (dark map → light label) while still reading as a clear, honest dim. Mine keeps
+// the deeper 0.35 floor since its contrast is intrinsic, not background-coupled.
+const DECAY_FLOOR_OPACITY_INCOMING = 0.55;
 const DECAY_MS = 90_000; // age at which a message reaches the resting floor
 // Shared-ticker cadence. ONE interval re-renders the whole list so every
 // bubble's opacity recomputes from its own age — we never run a timer/rAF per
@@ -63,10 +72,11 @@ const DECAY_REDUCED_TICK_MS = 5000;
 // ease-out (1 − (1−t)^2), and lerps FULL→FLOOR. At age 0 → FULL; at age ≥
 // DECAY_MS → FLOOR. No clock, no state — just math, so it's trivially testable
 // and identical on every render.
-function decayOpacity(ageMs: number): number {
+function decayOpacity(ageMs: number, floor: number = DECAY_FLOOR_OPACITY): number {
   const t = Math.min(Math.max(ageMs, 0), DECAY_MS) / DECAY_MS;
   const eased = 1 - (1 - t) * (1 - t); // ease-out: quick-ish settle, calm tail
-  return DECAY_FULL_OPACITY - eased * (DECAY_FULL_OPACITY - DECAY_FLOOR_OPACITY);
+  // S4 — the resting floor is per-style (incoming uses a higher AA-legible floor).
+  return DECAY_FULL_OPACITY - eased * (DECAY_FULL_OPACITY - floor);
 }
 
 // Reduced-motion STATIC step. Under prefers-reduced-motion we must NOT run a
@@ -78,8 +88,12 @@ function decayOpacity(ageMs: number): number {
 // never a continuous/animated transition. That discrete one-time step is what
 // prefers-reduced-motion permits and is exactly what the spec asked for.
 const DECAY_REDUCED_STEP_MS = DECAY_MS / 2;
-function staticDecayOpacity(ageMs: number): number {
-  return ageMs < DECAY_REDUCED_STEP_MS ? DECAY_FULL_OPACITY : DECAY_FLOOR_OPACITY;
+function staticDecayOpacity(
+  ageMs: number,
+  floor: number = DECAY_FLOOR_OPACITY,
+): number {
+  // S4 — the single calm step lands on the per-style floor (incoming = higher).
+  return ageMs < DECAY_REDUCED_STEP_MS ? DECAY_FULL_OPACITY : floor;
 }
 
 // Live read of the OS/browser reduced-motion preference. JS-driven decay (the
@@ -514,11 +528,19 @@ export default function ChatPanel({
           // FULL (age ≈ 0) so the two never visibly contend.
           const isNewest = i === messages.length - 1;
           const ageMs = now - m.createdAt;
+          // S4 — incoming bubbles rest at a higher floor so their text stays AA-
+          // legible over the translucent panel; mine keeps the deeper 0.35 floor
+          // (its contrast is intrinsic to the opaque signal fill). Newest stays
+          // pinned to FULL and the reduced-motion stepped path is unchanged in
+          // shape — both just inherit the per-style floor.
+          const floor = m.mine
+            ? DECAY_FLOOR_OPACITY
+            : DECAY_FLOOR_OPACITY_INCOMING;
           const opacity = isNewest
             ? DECAY_FULL_OPACITY
             : reduceMotion
-              ? staticDecayOpacity(ageMs)
-              : decayOpacity(ageMs);
+              ? staticDecayOpacity(ageMs, floor)
+              : decayOpacity(ageMs, floor);
           return (
             <div
               key={m.id}
