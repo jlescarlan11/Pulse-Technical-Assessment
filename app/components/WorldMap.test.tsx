@@ -31,8 +31,9 @@
  * NOTE on event dispatch: WorldMap binds its Escape + outside-pointerdown
  * handlers on `document` (native addEventListener), so those are dispatched at
  * the document level via fireEvent, mirroring how the real listeners fire. The
- * mapbox "zoom" event is driven through the mock's own on()/emit() mechanism
- * (mapEmit below), mirroring how Mapbox fires it on a real camera change.
+ * mapbox "zoom" / "move" events are driven through the mock's own on()/emit()
+ * mechanism (mapEmit below), mirroring how Mapbox fires them on a real camera
+ * change.
  */
 import "@testing-library/jest-dom";
 import { act, fireEvent, render, screen, within } from "@testing-library/react";
@@ -52,12 +53,24 @@ import { callSign } from "@/lib/callsign";
 // Phase 4 extensions: the zoom-bound sync effect reads getZoom/getMinZoom/
 // getMaxZoom and subscribes to the live "zoom" event, and the four controls call
 // zoomIn/zoomOut/flyTo/jumpTo/fitBounds. The fake therefore (a) stores every
-// on() handler keyed by event so tests can EMIT "zoom" after adjusting the
-// reported zoom, (b) implements the getters with test-tunable values, and (c)
+// on() handler keyed by event so tests can EMIT "zoom"/"move" after adjusting the
+// reported camera, (b) implements the getters with test-tunable values, and (c)
 // exposes the camera methods as jest.fn()s to assert on. The factory is hoisted
 // above the imports by jest, so it can't close over outer test state except via
 // `mock`-prefixed module variables — we capture the latest constructed map (and
 // a way to emit its events) on `mockMapState` for the tests to reach.
+//
+// Phase 4 (map controls, Recenter "atHome" dimming): the `atHome` sync effect
+// PROJECTS the pin and the map centre to screen pixels and compares the offset,
+// AND checks the live zoom against ME_ZOOM. The fake therefore also exposes a
+// tunable `_center` ({lng,lat}) via getCenter(), and a deterministic project()
+// that maps a [lng,lat] (or {lng,lat}) to a pixel Point RELATIVE to `_center`:
+// project(getCenter()) is exactly {x:500,y:500}, and the pin's pixel offset is a
+// clean linear function (1000 px/°) of how far `_center` sits from the pin. So
+// the pin reads as "home" only when `_center` is within ~0.008° of it AND the
+// zoom is within 0.05 of ME_ZOOM(4). The defaults below (_zoom=2, _center far
+// from any test `me`) deliberately keep atHome FALSE on first ready so the
+// existing recenter tests stay in a non-home state unless they opt in.
 //
 // LngLatBounds is a tiny fake whose extend() records the coords it was given, so
 // "frame all signals" can be asserted to include the PEER coords and exclude
@@ -98,6 +111,13 @@ jest.mock("mapbox-gl", () => {
     _minZoom = 1;
     _maxZoom = 20;
 
+    // Test-tunable map centre (Phase 4 — Recenter atHome). Defaults FAR from any
+    // `me` used in the suite so atHome is FALSE on first ready; combined with the
+    // default _zoom=2 (≠ ME_ZOOM=4) this doubly guarantees the Recenter button is
+    // live by default and clicking it reaches the camera (existing tests rely on
+    // that). Tests that want a home state set _center = me AND _zoom = ME_ZOOM.
+    _center: { lng: number; lat: number } = { lng: 999, lat: 999 };
+
     zoomIn = jest.fn();
     zoomOut = jest.fn();
     flyTo = jest.fn();
@@ -132,6 +152,26 @@ jest.mock("mapbox-gl", () => {
     }
     getMaxZoom() {
       return this._maxZoom;
+    }
+
+    getCenter() {
+      return this._center;
+    }
+
+    // Deterministic projection RELATIVE to the current `_center`: the centre maps
+    // to {500,500}, and every degree of offset from the centre is 1000 px. The
+    // component compares the pin's projection to project(getCenter()), so the
+    // measured pixel offset is hypot((lng-cLng)*1000, (lat-cLat)*1000) — i.e. the
+    // pin reads "centred" (offset < 8px) only when `_center` is within ~0.008° of
+    // it. Accepts both the [lng,lat] tuple (the pin path) and the {lng,lat}
+    // object getCenter() returns (the centre path).
+    project(coord: [number, number] | { lng: number; lat: number }) {
+      const lng = Array.isArray(coord) ? coord[0] : coord.lng;
+      const lat = Array.isArray(coord) ? coord[1] : coord.lat;
+      return {
+        x: 500 + (lng - this._center.lng) * 1000,
+        y: 500 - (lat - this._center.lat) * 1000,
+      };
     }
 
     addControl() {
@@ -169,6 +209,7 @@ const mockMapState: {
     _zoom: number;
     _minZoom: number;
     _maxZoom: number;
+    _center: { lng: number; lat: number };
     zoomIn: jest.Mock;
     zoomOut: jest.Mock;
     flyTo: jest.Mock;
@@ -193,6 +234,15 @@ function emitZoom() {
   });
 }
 
+// Drive a Mapbox "move" event after adjusting `_center` / `_zoom`, wrapped in
+// act() because it flips React state (the Recenter `atHome` flag). The component
+// binds "move" (fires on pan AND zoom); tests set the camera then emit "move".
+function emitMove() {
+  act(() => {
+    getMap().emit("move");
+  });
+}
+
 // The component imports the Mapbox stylesheet for its side effects; jest can't
 // parse CSS, so stub it to nothing.
 jest.mock("mapbox-gl/dist/mapbox-gl.css", () => ({}), { virtual: true });
@@ -206,6 +256,11 @@ process.env.NEXT_PUBLIC_MAPBOX_TOKEN = "pk.test-token";
 
 // Imported AFTER the env var + mocks so the module-level TOKEN const is truthy.
 import WorldMap from "./WorldMap";
+
+// The home zoom Recenter flies/jumps to (and the altitude atHome checks against).
+// Mirrors the component's ME_ZOOM const; kept in sync here so the atHome tests
+// read intent ("home zoom") rather than a bare 4.
+const ME_ZOOM = 4;
 
 // --- fixtures ---------------------------------------------------------------
 // Three peers with distinct ids so their call-signs are independently asserted.
@@ -243,6 +298,17 @@ async function renderMap(over: Partial<React.ComponentProps<typeof WorldMap>> = 
   );
   await flushMicrotasks();
   return { ...utils, onPeerClick };
+}
+
+// Put the mocked camera into the "home" state for the given `me`: pin centred
+// (offset 0px) AND at ME_ZOOM, then fire "move" so the atHome flag settles.
+// Used by the dimming tests; pulled into a helper so the home contract is
+// expressed once.
+function goHome(me: { lat: number; lng: number } = ME) {
+  const map = getMap();
+  map._center = { lng: me.lng, lat: me.lat };
+  map._zoom = ME_ZOOM;
+  emitMove();
 }
 
 // The chip is the disclosure toggle. With peers present its accessible name is
@@ -628,6 +694,10 @@ describe("WorldMap map-controls cluster (Phase 4)", () => {
     await renderMap();
     const map = getMap();
 
+    // Start from a NON-home state (the default _center sits far from `me` and the
+    // default _zoom is 2 ≠ ME_ZOOM), and assert that explicitly — so this test
+    // never silently passes against a dimmed button: it's only a "fly" when the
+    // map is somewhere else and Recenter is live.
     expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "false");
     fireEvent.click(getRecenterBtn());
 
@@ -664,6 +734,9 @@ describe("WorldMap map-controls cluster (Phase 4)", () => {
       await renderMap();
       const map = getMap();
 
+      // Same non-home precondition as the fly test: the button is live, so the
+      // click reaches the camera (here jumpTo, under reduced motion).
+      expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "false");
       fireEvent.click(getRecenterBtn());
 
       // Under reduced motion the camera jumps (no JS animation), not flies.
@@ -674,6 +747,90 @@ describe("WorldMap map-controls cluster (Phase 4)", () => {
     } finally {
       window.matchMedia = realMatchMedia;
     }
+  });
+
+  // --- Story 2: Recenter dims when already home — Option A ------------------
+  // Refinement: Recenter dims (aria-disabled) when tapping it would be a NO-OP —
+  // i.e. the pin is ALREADY centred in the viewport AND the map is at the home
+  // zoom (ME_ZOOM). "Option A" is the AND of both conditions: zoom matters as
+  // much as pan. The `atHome` flag is computed in screen PIXELS off the live
+  // "move" event (project the pin, compare to the projected centre) and only
+  // counts as home within ~8px (≈0.008° here) AND within 0.05 of ME_ZOOM. Tests
+  // drive it by setting `_center`/`_zoom` on the mock then emitting "move".
+  it("dims Recenter (aria-disabled) when already centred on the pin at the home zoom", async () => {
+    await renderMap();
+
+    // Centre exactly on `me` and sit at ME_ZOOM, then let "move" settle atHome.
+    goHome();
+
+    // A tap here would change nothing → the button dims to signal the no-op.
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("keeps Recenter enabled when centred on the pin but NOT at the home zoom (zoom matters — Option A)", async () => {
+    await renderMap();
+    const map = getMap();
+
+    // Pin is dead-centre, but the camera is zoomed IN past the home altitude.
+    // Under Option A a tap would still change the zoom, so Recenter stays live.
+    map._center = { lng: ME.lng, lat: ME.lat };
+    map._zoom = 8; // well outside the 0.05 window around ME_ZOOM(4)
+    emitMove();
+
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "false");
+  });
+
+  it("keeps Recenter enabled when at the home zoom but panned off-centre", async () => {
+    await renderMap();
+    const map = getMap();
+
+    // At the home altitude, but the pin has been panned well off the viewport
+    // centre (+5° lng ≈ 5000px at the mock's 1000px/° scale, far past the 8px
+    // home window). A tap would re-centre, so Recenter stays live.
+    map._center = { lng: ME.lng + 5, lat: ME.lat };
+    map._zoom = ME_ZOOM;
+    emitMove();
+
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "false");
+  });
+
+  it("re-enables Recenter after the user pans away from home", async () => {
+    await renderMap();
+    const map = getMap();
+
+    // Start home → dimmed.
+    goHome();
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "true");
+
+    // The user pans: the pin drifts off-centre (still at home zoom). The live
+    // "move" event must re-light Recenter the instant we're no longer home.
+    map._center = { lng: ME.lng + 2, lat: ME.lat };
+    emitMove();
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "false");
+  });
+
+  it("Recenter is a no-op when already home: clicking it does not call flyTo/jumpTo", async () => {
+    await renderMap();
+    const map = getMap();
+
+    // Home state: the button is dimmed AND its handler must early-return.
+    goHome();
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "true");
+
+    // aria-disabled buttons stay activatable, so the SAFETY is the atHome guard
+    // in recenterOnMe(): clicking at home must reach NEITHER camera method.
+    fireEvent.click(getRecenterBtn());
+    expect(map.flyTo).not.toHaveBeenCalled();
+    expect(map.jumpTo).not.toHaveBeenCalled();
+
+    // Sanity counterpart: pan away from home, and the SAME click now flies — so
+    // the no-op above is the atHome guard, not a dead button.
+    map._center = { lng: ME.lng + 5, lat: ME.lat };
+    map._zoom = ME_ZOOM;
+    emitMove();
+    expect(getRecenterBtn()).toHaveAttribute("aria-disabled", "false");
+    fireEvent.click(getRecenterBtn());
+    expect(map.flyTo).toHaveBeenCalledTimes(1);
   });
 
   // --- Story 3: frame all signals ------------------------------------------

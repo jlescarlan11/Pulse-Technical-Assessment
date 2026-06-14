@@ -69,6 +69,11 @@ export default function WorldMap({
   const [atMinZoom, setAtMinZoom] = useState(false);
   const [atMaxZoom, setAtMaxZoom] = useState(false);
 
+  // Phase 4 (map controls) — `atHome` dims Recenter when tapping it would change
+  // nothing: the pin is already centred AND the map is at the home zoom. Synced
+  // in screen pixels off the live "move" event (see the effect below).
+  const [atHome, setAtHome] = useState(false);
+
   // C2 — accessible fallback path: the count chip toggles a focusable list of
   // nearby signals so keyboard / screen-reader users can connect without
   // hunting spatial markers. The list is an honest DISCLOSURE (not a modal):
@@ -143,14 +148,16 @@ export default function WorldMap({
   // the CSS reduced-motion block can't reach. Guarded on a live `me`.
   const recenterOnMe = useCallback(() => {
     const map = mapRef.current;
-    if (!map || !me) return;
+    // No-op when there's no fix or we're already home (the button is aria-disabled
+    // in both cases, but it stays activatable, so guard the action too).
+    if (!map || !me || atHome) return;
     const camera = { center: [me.lng, me.lat] as [number, number], zoom: ME_ZOOM };
     if (prefersReducedMotion()) {
       map.jumpTo(camera);
     } else {
       map.flyTo(camera);
     }
-  }, [me]);
+  }, [me, atHome]);
 
   // Story 3 — Frame all signals. Fit the camera to every PEER dot at once; the
   // user's own `me` pin is deliberately excluded so the frame answers "where are
@@ -320,6 +327,34 @@ export default function WorldMap({
     };
   }, [ready]);
 
+  // Phase 4 (map controls) — keep `atHome` in sync so Recenter dims exactly when
+  // tapping it would change nothing: the user's pin sits at the viewport centre
+  // AND the zoom is already ME_ZOOM. We measure the centre offset in PIXELS
+  // (project the pin, compare to the projected map centre) so the check is
+  // zoom-robust, and bind the live "move" event (fires on pan AND zoom) so the
+  // button re-lights the instant the user drifts away. With no fix the button is
+  // already disabled, so atHome is held false.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !ready || !me) {
+      setAtHome(false);
+      return;
+    }
+
+    const sync = () => {
+      const pin = map.project([me.lng, me.lat]);
+      const centre = map.project(map.getCenter());
+      const offsetPx = Math.hypot(pin.x - centre.x, pin.y - centre.y);
+      setAtHome(offsetPx < 8 && Math.abs(map.getZoom() - ME_ZOOM) < 0.05);
+    };
+
+    sync();
+    map.on("move", sync);
+    return () => {
+      map.off("move", sync);
+    };
+  }, [ready, me]);
+
   // Show / move the user's own "you are here" pin.
   useEffect(() => {
     const map = mapRef.current;
@@ -425,8 +460,9 @@ export default function WorldMap({
   const hasPeers = peers.length > 0;
   const showLoading = Boolean(TOKEN) && !ready;
   // Story 2 — Recenter is live the instant a fix lands; disabled (not hidden)
-  // until then. Story 3 — Frame needs at least one peer to frame.
-  const canRecenter = me !== null;
+  // until then, and also while we're already home (centred at ME_ZOOM), where a
+  // tap would do nothing. Story 3 — Frame needs at least one peer to frame.
+  const canRecenter = me !== null && !atHome;
   const canFrame = hasPeers;
 
   return (
