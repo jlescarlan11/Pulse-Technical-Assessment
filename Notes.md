@@ -1336,3 +1336,54 @@ Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `
 - *"Presence-only"* (a static glow whose brightness is just the nearest peer's closeness) largely **duplicates what the map already shows** and barely changes given static per-session data.
 
 **The decision:** Hold Proximity Pulse rather than ship something inert or redundant. *Honest by design* has to apply to our own shipping bar — a feature whose headline behavior can't happen doesn't ship just because it compiles and tests green. The exploration stays in git history; when there's a location-republishing mechanism to build it on, it returns properly scoped. This mirrors the discipline behind the earlier rejected path: prefer one feature that genuinely works to two where one only looks like it does.
+
+---
+
+# Phase 4: Delivery Echo — An Honest "Delivered"
+
+**Status:** Shipped
+**Date:** 2026-06-14
+**Branch:** `feature/delivery-echo`
+
+**Brief & thinking:** Every chat quietly raises one question — *did my message actually reach them?* — and most apps answer it dishonestly, inferring "delivered" from a server hop or claiming "seen" when they only know a tab is open. Pulse has a sharper version of the problem: chat rides WebRTC peer-to-peer and **never touches the server**, so there is *no server witness* at all. If the peer's tab died or the channel dropped, you were typing into the void with zero signal. Delivery Echo closes that gap while claiming only what's provable.
+
+**The gating finding:** an investigation confirmed chat is pure P2P (`prisma/schema.prisma` models only presence/signals/rate-limit; messages travel the `RTCDataChannel` and are never persisted). That killed the obvious "ack through a server table" design — it would leak chat metadata and break the privacy invariant — and pointed at the honest mechanism: an **application-level ack over the same data channel.**
+
+**What it is:** A Messenger/iMessage-style indicator under your **newest** message: a muted **Sent** the moment it goes out, flipping to **Delivered** (mint accent) when the peer's client confirms receipt. No server, no DB, no API route. "Delivered" means *reached the peer's client* — never "read"/"seen".
+
+**How it works:**
+- **Self-identifying frames:** an outbound message carries the sender's local id — `{t:"msg", text, id}`. The peer echoes that id back verbatim in `{t:"ack", id}`.
+- **Ack only after honest handling:** the receiver sends the ack *only after* the message survives the inbound flood clamp **and** is handed to `onChat` (i.e. genuinely received and rendered). A clamp-dropped message sends no ack and honestly stays un-delivered.
+- **Clamp-exempt acks:** the `{t:"ack"}` branch sits alongside `ctrl`/`typing`, exempt from the chat flood clamp — clamping acks would falsely strand delivered messages, so this is a hard requirement.
+- **Match by id, idempotent:** the sender flips exactly the matching outbound message (`m.id === id && m.mine && !m.delivered`); duplicate/foreign/stale acks are no-ops, order-independent. The shared `msgId` counter is monotonic and never resets, so a late ack from a previous session can't flip a recycled id.
+- **Honest "Sent":** `sendChat` returns whether the frame actually went out over an open channel; only then is the message marked `sent`. A no-op'd send on a closed channel claims nothing.
+- **Newest-only, outside the bubble:** the indicator renders only under the newest message when it's ours, below the bubble in the mono status voice. Once the peer replies (newest line is theirs) it hides — their reply is itself proof of receipt, and a stale label above it would read as orphaned.
+- **Screen readers:** a polite live region announces "Message delivered" on each real delivery (independent of the last-only visual rule); never "read"/"seen".
+
+**Key decisions & honesty:**
+- **No timeout-to-Delivered, ever.** A real ack is the *sole* path. "Assume delivered after N seconds" is exactly the dishonest shortcut this feature exists to avoid.
+- **"Delivered", not "Seen" — held under pressure.** When testing showed "Delivered" appearing while the recipient was on another tab, the proposal was to rename it "Seen." We held the line: a backgrounded tab still runs JS, still receives over the data channel, still acks — so "Delivered" is *correct*. "Seen" would over-claim a human read it, the same tab-not-gaze line Reciprocal Video refused to cross. The honest version of "are they here right now" is a separate Active/Away presence signal, not a relabel.
+- **The visual arc.** A UI/UX review flagged that a label on *every* bubble becomes a "Sent / Sent / Sent" drumbeat that reads as anxious. We tried Delivered-only, then checkmark-only, and landed on Sent→Delivered **newest-only** — last-only is precisely what makes the words safe.
+- **`Number.isInteger` id guard (QA hardening):** ids are always the sender's small integer counter, so a non-integer (float, or defensively NaN/Infinity) is treated as a malformed frame and ignored.
+
+**Change summary:**
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `lib/webrtc.ts` — protocol | `sendChat(text, id)` sends `{t:"msg", text, id}`; new `sendAck(id)` sends `{t:"ack", id}` | The id rides the existing channel so the peer can echo it; no new transport |
+| `lib/webrtc.ts` — dispatch | Ack sent only inside the clamp-passed `onChat` path; new clamp-exempt `t:"ack"` branch fires `onDelivered`; both id paths guarded by `Number.isInteger` | Ack = proof of real receipt, never of a dropped message; acks can't be starved or spoofed by non-integer ids |
+| `lib/webrtc.ts` — `safeSend`/`sendChat` return `boolean` | Report whether the frame actually went out | Lets the UI claim "Sent" only when it's true |
+| `app/page.tsx` — `onDelivered` | Flip the matching outbound message by id (idempotent, order-independent) | Match by identity, not position; stale/duplicate acks are no-ops |
+| `app/page.tsx` — `onSend` | Allocate id, send, and mark `sent` only if the send succeeded | Same id tags the local message and rides the wire; honest Sent |
+| `app/components/ChatPanel.tsx` — indicator | Sent→Delivered below the bubble, newest-mine-only, hides once the peer replies; mono status voice (`text-haze-400` → `text-signal`) | The Messenger convention; last-only removes the per-bubble drumbeat so the words are safe |
+| `app/components/ChatPanel.tsx` — a11y | Polite live region announces "Message delivered" per real delivery | Honest copy, never "read"/"seen"; coalesces under rapid deliveries |
+
+**Total:** An honest per-message delivery signal for P2P chat — Sent→Delivered under your newest message, sourced from a data-channel ack the peer sends only after genuinely receiving and rendering the message. Frontend-only: **no API route, no schema change, no server involvement** — chat stays entirely off the wire, preserving the privacy invariant. Full suite **249/249 across 21 suites** (new `lib/webrtc.delivery.test.ts` protocol suite + `ChatPanel.delivery.test.tsx`). `tsc` clean, lint clean. Full pipeline: investigate → `project-manager` → `stakeholder` (gate) → `frontend-engineer` → `ui-ux-critic` + `test-engineer` → `code-reviewer` (approved, zero blocking) → `qa-engineer` (QA-READY; found the non-integer-id hardening).
+**Risk:** Low — additive over the existing data channel; no server/schema/signaling change. The one inherent limit (documented, accepted): a hostile peer could ack an id before truly rendering it — inherent to any P2P ack, consistent with "the peer's client confirmed receipt", and unfixable without signed acks.
+
+**What I'd do next (with more time):**
+- **An honest Active/Away presence cue** — the *real* answer to "are they paying attention right now," built on the existing tab-presence heartbeats (the same machinery as Reciprocal Video), framed as tab-focus and never as "seen."
+- **A subtle motion on the Sent→Delivered flip** (signal-eased, gated behind `prefers-reduced-motion`) so the upgrade seats into the app's breathing motion language instead of a hard swap.
+- **Coalesced "N delivered" announcement** if real ack cadence ever makes the per-delivery polite announcement chatty.
+
+**Phase 4 (continued) deliverable:** Delivery Echo answers "did it land?" with a signal that claims only what the architecture can prove. The discipline is in what it refuses — no server witness (chat stays P2P), no "Seen" (we can't prove a human read it), no timeout (only a real ack delivers), and no per-bubble clutter (newest-only). The honest "Delivered" is a stronger, truer claim than the read-receipt theater it deliberately avoids.
