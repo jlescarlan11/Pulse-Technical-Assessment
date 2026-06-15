@@ -21,14 +21,9 @@ import {
   initialVideo,
   type VideoState,
 } from "./state/videoReducer";
+import { useReciprocalVideo } from "./hooks/useReciprocalVideo";
 
 const REQUEST_TIMEOUT_MS = 30_000;
-
-// ── Reciprocal Video (mutual-presence) tuning ──
-const AWAY_DEBOUNCE_MS = 500; // tab must stay hidden this long before cutting
-const RESUME_DELAY_MS = 150; // settle before re-showing once mutually present
-const HEARTBEAT_INTERVAL_MS = 2_000; // presence ping cadence while present
-const HEARTBEAT_TIMEOUT_MS = 4_000; // no ping within this ⇒ peer treated as away
 
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
@@ -85,35 +80,6 @@ export default function Home() {
     [setVideo, videoRef],
   );
 
-  // Mute/camera controls. Track user's manual audio/video toggles.
-  // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
-  // the user WANTS sent (false = they clicked "turn off camera").
-  //
-  // Camera is mirrored into a ref because the presence gate (applyVideoGate) —
-  // which runs on every 2s heartbeat — must read the latest manual intent to
-  // decide whether to (re)enable the outgoing track. Without this, every
-  // heartbeat re-enabled video and overrode a manual camera-off. The outgoing
-  // video is now gated on BOTH mutual presence AND this manual intent.
-  const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOn, cameraOnRef, setIsCameraOn] = useRefState(true);
-  // Peer's mute/camera state, set from inbound control messages.
-  const [peerMuted, setPeerMuted] = useState(false);
-  const [peerCameraOn, setPeerCameraOn] = useState(true);
-
-  // ── Reciprocal Video presence state ──
-  // localAway: this tab has stepped away (hidden/pagehide). peerAway: the
-  // stranger has — fail-closed (assume away until the first heartbeat arrives).
-  // Mirrored into refs so the heartbeat interval and the data-channel control
-  // handler read the latest value without re-subscribing.
-  const [localAway, localAwayRef, setLocalAway] = useRefState(false);
-
-  // peerAway seeds fail-closed (true): we assume the stranger is away until the
-  // first heartbeat proves otherwise, so no clear feed ever leaks at call start.
-  const [peerAway, peerAwayRef, setPeerAway] = useRefState(true);
-
-  const lastPeerPresentAt = useRef(0); // 0 = never heard from the peer yet
-  const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   const peerRef = useRef<PeerSession | null>(null);
 
   // Chat over the P2P data channel: message list, typing indicator, and the
@@ -123,6 +89,27 @@ export default function Home() {
   // Destructured so the poll effect can list the stable `filterPeers` callback
   // directly (the linter tracks the object root, not `blocklist.filterPeers`).
   const { block, unblock, isBlocked, filterPeers } = useBlocklist();
+  // Reciprocal-video privacy engine: the mutual-presence shield + the manual
+  // mute/camera controls. Owns the [video]-keyed presence effect, the outgoing-
+  // track gate, and the away/mute/camera state surfaced to VideoPanel. Receives
+  // the shared peerRef and the current video state (the effect runs only while
+  // "active").
+  const {
+    localAway,
+    peerAway,
+    isMuted,
+    isCameraOn,
+    peerMuted,
+    peerCameraOn,
+    toggleMute,
+    toggleCamera,
+    notePeerPresent,
+    notePeerAway,
+    setPeerMuted,
+    setPeerCameraOn,
+    resetPresence,
+    resetControls,
+  } = useReciprocalVideo(peerRef, video);
 
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Auto-dismiss timer for an INCOMING prompt the receiver never answers. The
@@ -174,49 +161,6 @@ export default function Home() {
     }
   }
 
-  // Gate the OUTGOING video track on mutual presence (the protective core).
-  // Cutting is instant — close the one-sided window immediately; resuming waits
-  // RESUME_DELAY_MS and re-checks mutual presence at fire time to avoid strobing
-  // on rapid flaps. Disabling the track yields black frames at the source, so an
-  // absent/lurking peer's recorder captures nothing recognizable.
-  function applyVideoGate() {
-    const ps = peerRef.current;
-    if (!ps) return;
-    if (resumeTimer.current) {
-      clearTimeout(resumeTimer.current);
-      resumeTimer.current = null;
-    }
-    // The outgoing video may only flow when BOTH the presence shield is
-    // satisfied (mutually present) AND the user hasn't manually turned their
-    // camera off. The manual intent is read from a ref so the 2s heartbeat,
-    // which calls this, never re-enables a track the user explicitly cut.
-    const mutuallyPresent = !localAwayRef.current && !peerAwayRef.current;
-    const shouldSend = mutuallyPresent && cameraOnRef.current;
-    if (!shouldSend) {
-      // Cutting is instant — manual-off or an absent peer both close the window
-      // immediately with no resume delay.
-      ps.setOutgoingVideoEnabled(false);
-    } else {
-      resumeTimer.current = setTimeout(() => {
-        resumeTimer.current = null;
-        if (!localAwayRef.current && !peerAwayRef.current && cameraOnRef.current) {
-          peerRef.current?.setOutgoingVideoEnabled(true);
-        }
-      }, RESUME_DELAY_MS);
-    }
-  }
-
-  // Reset all presence state so it never leaks into the next call.
-  function resetPresence() {
-    if (resumeTimer.current) {
-      clearTimeout(resumeTimer.current);
-      resumeTimer.current = null;
-    }
-    setLocalAway(false);
-    setPeerAway(true); // back to fail-closed for the next call
-    lastPeerPresentAt.current = 0;
-  }
-
   function teardown(message?: string) {
     if (requestTimer.current) clearTimeout(requestTimer.current);
     if (incomingTimer.current) clearTimeout(incomingTimer.current);
@@ -228,10 +172,7 @@ export default function Home() {
     resetPresence();
     chat.reset();
     setOriginPeer(null);
-    setIsMuted(false);
-    setIsCameraOn(true);
-    setPeerMuted(false);
-    setPeerCameraOn(true);
+    resetControls();
     dispatchConn({ type: "RESET" });
     if (message) showNotice(message);
   }
@@ -270,28 +211,6 @@ export default function Home() {
     }
   }
 
-  function toggleMute() {
-    const ps = peerRef.current;
-    if (!ps) return;
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    ps.setOutgoingAudioEnabled(!newMuted);
-    ps.sendControl(newMuted ? "audio-mute" : "audio-unmute");
-  }
-
-  function toggleCamera() {
-    const ps = peerRef.current;
-    if (!ps) return;
-    const newCameraOn = !isCameraOn;
-    setIsCameraOn(newCameraOn);
-    // Route through the gate rather than toggling the track directly: it folds
-    // the new manual intent together with mutual presence, so turning the camera
-    // "on" while the peer is away stays shielded, and turning it "off" cuts
-    // instantly regardless of presence. cameraOnRef is already updated above.
-    applyVideoGate();
-    ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
-  }
-
   function handleControl(ctrl: PeerControl) {
     const ps = peerRef.current;
     switch (ctrl) {
@@ -327,18 +246,11 @@ export default function Home() {
         break;
       case "presence-present":
         // The stranger's tab is active again (also the periodic heartbeat).
-        if (videoRef.current === "active") {
-          lastPeerPresentAt.current = Date.now();
-          if (peerAwayRef.current) setPeerAway(false);
-          applyVideoGateRef.current();
-        }
+        if (videoRef.current === "active") notePeerPresent();
         break;
       case "presence-away":
         // The stranger switched away — cut our outgoing feed immediately.
-        if (videoRef.current === "active") {
-          if (!peerAwayRef.current) setPeerAway(true);
-          applyVideoGateRef.current();
-        }
+        if (videoRef.current === "active") notePeerAway();
         break;
       case "audio-mute":
         setPeerMuted(true);
@@ -578,14 +490,6 @@ export default function Home() {
     // re-runs on a conn change.
   }, [conn, showNotice, dispatchConn, connRef]);
 
-  // applyVideoGate is recreated each render; read it through a ref inside the
-  // heartbeat interval and the data-channel control handler so effect deps stay
-  // honest and the interval isn't torn down on every render.
-  const applyVideoGateRef = useRef(applyVideoGate);
-  useEffect(() => {
-    applyVideoGateRef.current = applyVideoGate;
-  });
-
   // refreshToken closes over sessionId (stable) but is recreated each render;
   // read it through a ref inside the poll interval so the effect deps stay
   // honest and the interval isn't torn down/recreated needlessly.
@@ -675,101 +579,6 @@ export default function Home() {
       window.removeEventListener("beforeunload", onLeave);
     };
   }, [sessionId, phase]);
-
-  // ── Reciprocal Video: mutual-presence privacy engine ──────────────────────
-  // While a video call is active, clear video is transmitted only while BOTH
-  // tabs are present. Either side switching away (tab hidden / pagehide) cuts
-  // the OUTGOING video at the source, so a present user can never watch or
-  // record a clear feed of an absent stranger. Audio is untouched. Presence is
-  // exchanged as data-channel heartbeats: a "presence-present" ping every
-  // HEARTBEAT_INTERVAL_MS while present, an explicit "presence-away" on going
-  // hidden, plus a fail-closed staleness check (no ping within
-  // HEARTBEAT_TIMEOUT_MS ⇒ peer treated as away) so a dropped channel can't leak
-  // a clear feed. Detection is tab visibility only — NOT gaze.
-  useEffect(() => {
-    if (video !== "active") return;
-    let awayTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const goAway = () => {
-      awayTimer = undefined;
-      if (localAwayRef.current) return;
-      setLocalAway(true);
-      peerRef.current?.sendControl("presence-away");
-      applyVideoGateRef.current();
-    };
-
-    const comeBack = () => {
-      if (awayTimer) {
-        clearTimeout(awayTimer);
-        awayTimer = undefined;
-      }
-      if (localAwayRef.current) setLocalAway(false);
-      peerRef.current?.sendControl("presence-present");
-      applyVideoGateRef.current();
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        if (!awayTimer) awayTimer = setTimeout(goAway, AWAY_DEBOUNCE_MS);
-      } else {
-        comeBack();
-      }
-    };
-
-    // pagehide is the most dangerous "absent" state — cut instantly, no debounce.
-    const onPageHide = () => {
-      if (localAwayRef.current) return;
-      setLocalAway(true);
-      peerRef.current?.sendControl("presence-away");
-      applyVideoGateRef.current();
-    };
-
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pagehide", onPageHide);
-    // beforeunload too, so a hard close/navigation cuts instantly rather than
-    // waiting out the ~HEARTBEAT_TIMEOUT_MS staleness window on the peer.
-    window.addEventListener("beforeunload", onPageHide);
-
-    // Announce presence immediately so the peer clears its fail-closed default
-    // within ~1 RTT instead of waiting a full heartbeat interval — otherwise the
-    // call would start with both feeds black for up to HEARTBEAT_INTERVAL_MS.
-    peerRef.current?.sendControl("presence-present");
-    // Enforce the initial gate: the peer starts fail-closed, so hold our video
-    // until the first heartbeat confirms mutual presence.
-    applyVideoGateRef.current();
-
-    const heartbeat = setInterval(() => {
-      if (!localAwayRef.current) {
-        peerRef.current?.sendControl("presence-present");
-      }
-      // Fail-closed staleness: peer silent past the timeout ⇒ treat as away.
-      const last = lastPeerPresentAt.current;
-      const stale = last === 0 || Date.now() - last > HEARTBEAT_TIMEOUT_MS;
-      if (stale && !peerAwayRef.current) {
-        setPeerAway(true);
-        applyVideoGateRef.current();
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-
-    // If the tab is already hidden when the call starts, go away immediately —
-    // no debounce on the initial state (the debounce only guards mid-call flaps).
-    if (document.visibilityState === "hidden") {
-      goAway();
-    }
-
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pagehide", onPageHide);
-      window.removeEventListener("beforeunload", onPageHide);
-      clearInterval(heartbeat);
-      if (awayTimer) clearTimeout(awayTimer);
-    };
-    // CRITICAL: this effect must re-run ONLY when `video` changes — re-running
-    // re-arms the heartbeat and re-sends presence. setLocalAway/setPeerAway
-    // (useRefState setters) and localAwayRef/peerAwayRef (useRefState refs) are
-    // all referentially stable hook returns, so adding them satisfies
-    // exhaustive-deps WITHOUT introducing an extra re-run trigger.
-  }, [video, setLocalAway, setPeerAway, localAwayRef, peerAwayRef]);
 
   async function handleReady(lat: number, lng: number) {
     setMyLocation({ lat, lng });
