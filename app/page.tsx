@@ -4,16 +4,17 @@ import { useEffect, useRef, useState } from "react";
 import EntryGate from "./components/EntryGate";
 import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
-import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
+import ChatPanel from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
 import { join, leave, poll, sendSignal, UnauthorizedError } from "@/lib/api";
 import { PeerSession, buildICEConfig, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 import { callSign } from "@/lib/callsign";
-import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
 import { useRefState } from "./hooks/useRefState";
 import { useNotice } from "./hooks/useNotice";
+import { useChat } from "./hooks/useChat";
+import { useBlocklist } from "./hooks/useBlocklist";
 type Conn =
   | { kind: "idle" }
   | { kind: "requesting"; peerId: string }
@@ -40,7 +41,6 @@ export default function Home() {
   // should re-run when it rotates. Mirrors sessionId's session-long lifetime.
   const tokenRef = useRef<string | null>(null);
   const [peers, setPeers] = useState<PeerDot[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
   // Notice / toast system (transient confirmation toast + terminal notice +
   // the Block→Undo focus safety net). The render keeps the JSX (live regions +
   // visible toast) and reads `notice`/`terminalNotice`; callers raise notices
@@ -56,11 +56,6 @@ export default function Home() {
   } = useNotice();
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  // Typing indicator. True while the peer is composing a message.
-  // Ephemeral peer-driven UI flag: set straight from the data-channel callback
-  // (onTyping), cleared on a real inbound message and on teardown. No ref mirror
-  // needed — it is only read in render, never inside an interval or callback.
-  const [peerTyping, setPeerTyping] = useState(false);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
@@ -105,17 +100,15 @@ export default function Home() {
   const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const peerRef = useRef<PeerSession | null>(null);
-  const msgId = useRef(0);
-  // An EPHEMERAL, in-memory blocklist of peer ids the
-  // user has refused. Held in a ref ON PURPOSE: it is read synchronously inside
-  // the poll tick (to filter discovery) and inside processSignal (to auto-decline
-  // inbound requests), and it must NOT survive the tab. No state, no localStorage,
-  // no DB — a peer is identified by a per-page-load UUID, so this list dies with
-  // the session and a reloaded peer gets a fresh identity. That ceiling is stated
-  // honestly in the UI copy (see the Block button title + the toast). The two
-  // decisions over this set (discovery filter + auto-decline) live as pure
-  // helpers in lib/blocklist.ts so they're unit-testable without the page.
-  const blockedRef = useRef<Set<string>>(new Set());
+
+  // Chat over the P2P data channel: message list, typing indicator, and the
+  // Delivery Echo "Sent → Delivered" lifecycle. Receives the shared peerRef.
+  const chat = useChat(peerRef);
+  // Session-scoped, in-memory peer blocklist (discovery filter + auto-decline).
+  // Destructured so the poll effect can list the stable `filterPeers` callback
+  // directly (the linter tracks the object root, not `blocklist.filterPeers`).
+  const { block, unblock, isBlocked, filterPeers } = useBlocklist();
+
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Auto-dismiss timer for an INCOMING prompt the receiver never answers. The
   // requester gives up after REQUEST_TIMEOUT_MS and tears down its peer; without
@@ -140,25 +133,6 @@ export default function Home() {
     } catch {
       return null;
     }
-  }
-
-  function addMessage(mine: boolean, text: string): number {
-    // createdAt is a CLIENT-ONLY wall-clock stamp (Date.now(), ms epoch) read
-    // solely by ChatPanel's Fade Trails decay. It is NOT sent over the wire,
-    // NOT persisted, and does NOT change a message's real lifetime — messages
-    // stay in-memory and are cleared on teardown.
-    //
-    // Delivery Echo: allocate the id BEFORE the setMessages closure so we can
-    // return it. The outbound send rides this SAME id on the wire ({t:"msg",
-    // id}); the peer echoes it back in an ack and onDelivered flips this exact
-    // message to Delivered by id. id is monotonic & session-local, never sent
-    // for incoming-tagging purposes beyond this.
-    const id = msgId.current++;
-    setMessages((prev) => [
-      ...prev,
-      { id, mine, text, createdAt: Date.now() },
-    ]);
-    return id;
   }
 
   // Token-aware signal sender. Pulls the current token from the ref, and on a
@@ -237,8 +211,7 @@ export default function Home() {
     setRemoteStream(null);
     setVideo("none");
     resetPresence();
-    setPeerTyping(false);
-    setMessages([]);
+    chat.reset();
     setOriginPeer(null);
     setIsMuted(false);
     setIsCameraOn(true);
@@ -260,32 +233,10 @@ export default function Home() {
           onSignal: (type: DescType, payload: string) => {
             void emitSignal(peerId, type, payload);
           },
-          onChat: (text) => {
-            // A real message means they have stopped typing.
-            setPeerTyping(false);
-            addMessage(false, text);
-          },
-          onDelivered: (id) => {
-            // Delivery Echo (Story C): flip exactly the matching OUTBOUND
-            // message to delivered, matched BY ID (not array position). Pure
-            // functional update keyed on id makes it idempotent — a duplicate,
-            // stale, or foreign ack maps to an already-delivered or non-matching
-            // message and returns prev unchanged, so no re-render / re-animate.
-            // Order-independent: rapid-fire acks each land on their own id.
-            setMessages((prev) => {
-              let changed = false;
-              const next = prev.map((m) => {
-                if (m.id === id && m.mine && !m.delivered) {
-                  changed = true;
-                  return { ...m, delivered: true };
-                }
-                return m;
-              });
-              return changed ? next : prev;
-            });
-          },
+          onChat: (text) => chat.receiveMessage(text),
+          onDelivered: (id) => chat.markDelivered(id),
           onControl: (ctrl) => handleControl(ctrl),
-          onTyping: (on) => setPeerTyping(on),
+          onTyping: (on) => chat.setPeerTyping(on),
           onRemoteStream: (stream) => setRemoteStream(stream),
           onConnectionState: (state) => {
             if (state === "failed") {
@@ -454,7 +405,7 @@ export default function Home() {
     const c = connRef.current;
     if (c.kind !== "connecting" && c.kind !== "connected") return;
     const peerId = c.peerId;
-    blockedRef.current.add(peerId);
+    block(peerId);
     void emitSignal(peerId, "end");
     teardown();
     const sign = callSign(peerId);
@@ -465,7 +416,7 @@ export default function Home() {
         // Un-block ONLY — removing the id lets them reappear in discovery and
         // request again. It deliberately does NOT reconnect.
         onAct: () => {
-          blockedRef.current.delete(peerId);
+          unblock(peerId);
           showNotice(`Unblocked ${sign}`);
         },
       },
@@ -517,7 +468,7 @@ export default function Home() {
         // produces, so it is indistinguishable from a normal decline — no
         // "you are blocked" signal is ever leaked to the peer. Checked first so
         // we never fall through to the busy path and double-emit decline.
-        if (isBlockedRequest(sig.fromId, blockedRef.current)) {
+        if (isBlocked(sig.fromId)) {
           void emitSignal(sig.fromId, "decline");
           break;
         }
@@ -672,7 +623,7 @@ export default function Home() {
         authFailures = 0; // a clean poll clears the backoff
         // Exclude blocked peers from discovery entirely (map dots, the
         // accessible "Nearby signals" list, and the count all derive from this).
-        setPeers(filterBlockedPeers(data.peers, blockedRef.current));
+        setPeers(filterPeers(data.peers));
         for (const s of data.signals) processSignalRef.current(s);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -691,9 +642,10 @@ export default function Home() {
       active = false;
       if (timer) clearTimeout(timer);
     };
-    // showTerminalNotice is a stable useNotice return, so listing it is
-    // churn-free — the loop still (re)starts only on a phase/session change.
-  }, [phase, sessionId, showTerminalNotice]);
+    // showTerminalNotice and blocklist.filterPeers are stable hook returns, so
+    // listing them is churn-free — the loop still (re)starts only on a
+    // phase/session change.
+  }, [phase, sessionId, showTerminalNotice, filterPeers]);
 
   useEffect(() => {
     if (!sessionId || phase !== "live") return;
@@ -1005,30 +957,16 @@ export default function Home() {
 
       {inChat && (
         <ChatPanel
-          messages={messages}
+          messages={chat.messages}
           connected={conn.kind === "connected"}
           videoBusy={video !== "none"}
-          onSend={(text) => {
-            // Delivery Echo: append locally first so we own the id, then send
-            // that SAME id on the wire. The peer's ack echoes it back and flips
-            // this message to Delivered (onDelivered, by id). sendChat returns
-            // whether the frame actually went out over an open channel — only
-            // then do we mark the message "Sent" (honest: a no-op'd send on a
-            // closed channel claims nothing).
-            const id = addMessage(true, text);
-            const sent = peerRef.current?.sendChat(text, id) ?? false;
-            if (sent) {
-              setMessages((prev) =>
-                prev.map((m) => (m.id === id ? { ...m, sent: true } : m)),
-              );
-            }
-          }}
+          onSend={chat.sendMessage}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
           onBlock={blockPeer}
           peerId={activePeerId}
-          peerTyping={peerTyping}
-          onTyping={(on: boolean) => peerRef.current?.sendTyping(on)}
+          peerTyping={chat.peerTyping}
+          onTyping={chat.sendTyping}
         />
       )}
 
