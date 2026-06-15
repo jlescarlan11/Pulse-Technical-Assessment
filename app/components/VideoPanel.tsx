@@ -927,6 +927,52 @@ export default function VideoPanel({
           </button>
         </div>
 
+        {/* Camera toggle button — distinctive filled camera icon with slash on off */}
+        <button
+          onClick={onToggleCamera}
+          aria-pressed={isCameraOn}
+          aria-label={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
+          title={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
+          className="group relative flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
+        >
+          {isCameraOn ? (
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {/* Video on (Lucide): camera body + lens prism */}
+              <path d="M22 8l-6 4 6 4V8z" />
+              <rect x="2" y="6" width="14" height="12" rx="2" />
+            </svg>
+          ) : (
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {/* Video off (Lucide): camera with a slash through it */}
+              <path d="M10.66 6H14a2 2 0 0 1 2 2v2.34l1 1L22 8v8" />
+              <path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2l10 10z" />
+              <line x1="2" y1="2" x2="22" y2="22" />
+            </svg>
+          )}
+          {/* Hover label tooltip */}
+          <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            {isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
+          </span>
+        </button>
+
         {/* Mute button — distinctive filled mic icon with slash on mute */}
         <button
           onClick={onToggleMute}
@@ -974,52 +1020,6 @@ export default function VideoPanel({
           {/* Hover label tooltip */}
           <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
             {isMuted ? COPY.unmuteLabel : COPY.muteLabel}
-          </span>
-        </button>
-
-        {/* Camera toggle button — distinctive filled camera icon with slash on off */}
-        <button
-          onClick={onToggleCamera}
-          aria-pressed={isCameraOn}
-          aria-label={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
-          title={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
-          className="group relative flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
-        >
-          {isCameraOn ? (
-            <svg
-              className="h-[22px] w-[22px]"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              {/* Video on (Lucide): camera body + lens prism */}
-              <path d="M22 8l-6 4 6 4V8z" />
-              <rect x="2" y="6" width="14" height="12" rx="2" />
-            </svg>
-          ) : (
-            <svg
-              className="h-[22px] w-[22px]"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden
-            >
-              {/* Video off (Lucide): camera with a slash through it */}
-              <path d="M10.66 6H14a2 2 0 0 1 2 2v2.34l1 1L22 8v8" />
-              <path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2l10 10z" />
-              <line x1="2" y1="2" x2="22" y2="22" />
-            </svg>
-          )}
-          {/* Hover label tooltip */}
-          <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
-            {isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
           </span>
         </button>
 
