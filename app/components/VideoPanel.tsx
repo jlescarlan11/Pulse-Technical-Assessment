@@ -1,6 +1,11 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
+import {
+  FILTER_PRESETS,
+  getFilterPreset,
+  type FilterPresetId,
+} from "@/lib/videoFilters";
 
 /* ============================================================
    Reciprocal Video copy — HONEST COPY
@@ -82,6 +87,14 @@ const COPY = {
   // stays live (you still see yourself), but the peer receives black. Honest:
   // states that this view is only yours, never claims to stop recording.
   notSharedCameraOff: "Off · only you see this",
+
+  // Camera filters. A "filter" here is a purely COSMETIC colour-grade applied to
+  // BOTH the transmitted feed and this self-view — never a privacy feature, face
+  // effect, or background. The labels stay honest: "Filters" describes a look,
+  // and the menu names a "look", never "privacy" / "blur" / "hide".
+  filterLabel: "Camera filter",
+  // Accessible name for the radiogroup of presets.
+  filterGroupLabel: "Camera filter — colour grade",
 } as const;
 
 type VideoPanelProps = {
@@ -118,6 +131,20 @@ type VideoPanelProps = {
    * Peer's camera state, received via control messages.
    */
   peerCameraOn: boolean;
+  /**
+   * The EFFECTIVE camera filter preset id currently in effect — i.e. the value
+   * PeerSession.setFilter() reported is actually being transmitted, not the
+   * user's last raw request. Drives both the picker's checked option and the
+   * self-view colour grade, so the UI can never claim a filter the peer isn't
+   * receiving. "none" => no grade (plain live camera).
+   */
+  selectedFilter: FilterPresetId;
+  /**
+   * Pick a preset. The parent routes this through PeerSession.setFilter() and
+   * stores the returned EFFECTIVE id, so a browser fallback to "none" flows back
+   * down as selectedFilter honestly.
+   */
+  onSelectFilter: (id: FilterPresetId) => void;
 };
 
 export default function VideoPanel({
@@ -132,11 +159,39 @@ export default function VideoPanel({
   onToggleCamera,
   peerMuted,
   peerCameraOn,
+  selectedFilter,
+  onSelectFilter,
 }: VideoPanelProps) {
   const localRef = useRef<HTMLVideoElement>(null);
   const remoteRef = useRef<HTMLVideoElement>(null);
   const [controlsUp, setControlsUp] = useState(true);
   const calmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Filter picker open/closed. Component-local: VideoPanel unmounts when the
+  // call ends (video !== "active") and remounts per call, so this latch — like
+  // the away/connected latches — resets naturally per call; no manual reset.
+  const [filterOpen, setFilterOpen] = useState(false);
+  // Refs to each radio option so Arrow keys can move focus within the group
+  // (the roving-tabindex pattern: only the checked option is in the tab order).
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+
+  // Arrow-key roving within the radiogroup. Enter/Space selection is handled by
+  // the native <button>; here we add Left/Up and Right/Down to move (and select)
+  // between options, wrapping at the ends — the standard radiogroup interaction.
+  const onRadioKeyDown = useCallback(
+    (e: React.KeyboardEvent, index: number) => {
+      const last = FILTER_PRESETS.length - 1;
+      let next = index;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") next = index === last ? 0 : index + 1;
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = index === 0 ? last : index - 1;
+      else return;
+      e.preventDefault();
+      const preset = FILTER_PRESETS[next];
+      onSelectFilter(preset.id);
+      optionRefs.current[next]?.focus();
+    },
+    [onSelectFilter],
+  );
 
   // Presence-derived state, computed by adjusting state during render when the
   // incoming props change (React's "you might not need an effect" pattern) —
@@ -250,7 +305,10 @@ export default function VideoPanel({
   // any stepped-away overlay is showing — or the remote video hasn't arrived —
   // we force the controls to stay up, mirroring the pre-stream behaviour.
   const anyAwayOverlay = showPeerAwayOverlay || outgoingHeld;
-  const forceControls = !remoteStream || anyAwayOverlay;
+  // An OPEN filter picker also forces the controls up — mirroring how the
+  // away-overlays force them up — so the 3.5s auto-calm recede timer can never
+  // hide the control bar (and the picker rooted in it) mid-selection.
+  const forceControls = !remoteStream || anyAwayOverlay || filterOpen;
   // Visible if interaction has them up OR a forced condition holds. Deriving
   // this (rather than syncing state in an effect) keeps the forced-up cases
   // truthful without cascading renders.
@@ -487,6 +545,14 @@ export default function VideoPanel({
               playsInline
               muted
               className="h-full w-full object-cover"
+              // Story 3 — honest self-view: paint the SAME colour-grade currently
+              // transmitted, reusing the shared css from getFilterPreset() (never
+              // a hand-written filter string) so preview and transmit can't drift.
+              // selectedFilter is the EFFECTIVE id, so a fallback to "none" => ""
+              // => plain live camera. Presentational ONLY: it never gates, freezes
+              // or blacks out the self-view — the track stays live in every gated
+              // state exactly as before; only the colour grade changes.
+              style={{ filter: getFilterPreset(selectedFilter).css || undefined }}
             />
 
             {outgoingHeld ? (
@@ -556,6 +622,112 @@ export default function VideoPanel({
             : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
+        {/* Filter control. A relatively-positioned wrapper anchors the popover
+            picker ABOVE the button. The button toggles the picker; while the
+            picker is open `filterOpen` forces the control bar to stay up (see
+            forceControls), so the auto-calm recede timer can never hide it
+            mid-selection — mirroring how the away-overlays force controls up.
+            Cosmetic only: state is conveyed by icon + the active label, never
+            colour alone. */}
+        <div className="relative">
+          {filterOpen && (
+            /* Preset picker. RADIO GROUP (stakeholder hard requirement): the
+               four presets are mutually exclusive, so role="radiogroup" +
+               role="radio"/aria-checked, NOT aria-pressed toggles. Roving
+               tabindex: only the checked option is tabbable; Arrow keys move
+               within the group (onRadioKeyDown) and Enter/Space select via the
+               native button. Glass surface, mono uppercase labels, signal accent
+               on the ACTIVE preset. The open/close uses a transition that globals
+               collapse under prefers-reduced-motion (no bespoke motion here). */
+            <div
+              role="radiogroup"
+              aria-label={COPY.filterGroupLabel}
+              className="animate-fade-up glass absolute bottom-[4.5rem] left-1/2 flex w-44 -translate-x-1/2 flex-col gap-1 rounded-2xl p-2 shadow-float"
+            >
+              {FILTER_PRESETS.map((preset, i) => {
+                const active = preset.id === selectedFilter;
+                return (
+                  <button
+                    key={preset.id}
+                    ref={(el) => {
+                      optionRefs.current[i] = el;
+                    }}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    tabIndex={active ? 0 : -1}
+                    onClick={() => onSelectFilter(preset.id)}
+                    onKeyDown={(e) => onRadioKeyDown(e, i)}
+                    className={`flex items-center justify-between rounded-xl px-3 py-2 font-mono text-[11px] uppercase tracking-wider transition duration-200 ease-[var(--ease-calm)] ${
+                      active
+                        ? "bg-signal/20 text-signal"
+                        : "text-haze-200 hover:bg-haze-200/10 hover:text-haze-50"
+                    }`}
+                  >
+                    <span className="truncate">{preset.label}</span>
+                    {/* Checkmark on the active preset — state by icon + accent,
+                        never colour alone. */}
+                    {active && (
+                      <svg
+                        className="h-3.5 w-3.5 shrink-0"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden
+                      >
+                        <path d="M20 6L9 17l-5-5" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <button
+            type="button"
+            onClick={() => setFilterOpen((o) => !o)}
+            aria-haspopup="true"
+            aria-expanded={filterOpen}
+            aria-label={COPY.filterLabel}
+            title={COPY.filterLabel}
+            className={`group relative flex h-14 w-14 items-center justify-center rounded-full shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] active:scale-95 ${
+              filterOpen || selectedFilter !== "none"
+                ? "bg-signal/30 text-signal"
+                : "bg-signal/20 text-signal hover:bg-signal/30"
+            }`}
+          >
+            {/* Sliders / adjustments glyph (Lucide stroke style), matching the
+                mic/camera SVGs — a colour-grade control, no privacy/eye imagery. */}
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <line x1="4" y1="21" x2="4" y2="14" />
+              <line x1="4" y1="10" x2="4" y2="3" />
+              <line x1="12" y1="21" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12" y2="3" />
+              <line x1="20" y1="21" x2="20" y2="16" />
+              <line x1="20" y1="12" x2="20" y2="3" />
+              <line x1="1" y1="14" x2="7" y2="14" />
+              <line x1="9" y1="8" x2="15" y2="8" />
+              <line x1="17" y1="16" x2="23" y2="16" />
+            </svg>
+            {/* Hover label tooltip */}
+            <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+              {COPY.filterLabel}
+            </span>
+          </button>
+        </div>
+
         {/* Mute button — distinctive filled mic icon with slash on mute */}
         <button
           onClick={onToggleMute}
