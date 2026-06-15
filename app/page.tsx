@@ -4,37 +4,26 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import EntryGate from "./components/EntryGate";
 import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
-import ChatPanel, { type ChatMessage } from "./components/ChatPanel";
+import ChatPanel from "./components/ChatPanel";
 import VideoPanel from "./components/VideoPanel";
 import { join, leave, poll, sendSignal, UnauthorizedError } from "@/lib/api";
 import { PeerSession, buildICEConfig, type DescType, type PeerControl } from "@/lib/webrtc";
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 import { callSign } from "@/lib/callsign";
-import { DEFAULT_FILTER_ID, type FilterPresetId } from "@/lib/videoFilters";
-import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
-type Conn =
-  | { kind: "idle" }
-  | { kind: "requesting"; peerId: string }
-  | { kind: "incoming"; peerId: string }
-  | { kind: "connecting"; peerId: string }
-  | { kind: "connected"; peerId: string };
-
-type VideoState = "none" | "requesting" | "incoming" | "active";
+import { useRefState } from "./hooks/useRefState";
+import { useNotice } from "./hooks/useNotice";
+import { useChat } from "./hooks/useChat";
+import { useBlocklist } from "./hooks/useBlocklist";
+import { connReducer, initialConn, type Conn } from "./state/connReducer";
+import {
+  videoReducer,
+  initialVideo,
+  type VideoState,
+} from "./state/videoReducer";
+import { useReciprocalVideo } from "./hooks/useReciprocalVideo";
 
 const REQUEST_TIMEOUT_MS = 30_000;
-
-// Auto-dismiss windows for the transient confirmation toast (showNotice).
-// A plain toast clears at NOTICE_MS; one carrying an action (e.g. Block's Undo)
-// gets NOTICE_ACTION_MS — a longer, calmer window to reach the control.
-const NOTICE_MS = 3500;
-const NOTICE_ACTION_MS = 6000;
-
-// ── Reciprocal Video (mutual-presence) tuning ──
-const AWAY_DEBOUNCE_MS = 500; // tab must stay hidden this long before cutting
-const RESUME_DELAY_MS = 150; // settle before re-showing once mutually present
-const HEARTBEAT_INTERVAL_MS = 2_000; // presence ping cadence while present
-const HEARTBEAT_TIMEOUT_MS = 4_000; // no ping within this ⇒ peer treated as away
 
 export default function Home() {
   const [phase, setPhase] = useState<"gate" | "live">("gate");
@@ -45,51 +34,21 @@ export default function Home() {
   // should re-run when it rotates. Mirrors sessionId's session-long lifetime.
   const tokenRef = useRef<string | null>(null);
   const [peers, setPeers] = useState<PeerDot[]>([]);
-  const [messages, setMessages] = useState<ChatMessage[]>([]);
-  // Transient confirmation toast. Most callers pass plain text; the Block flow
-  // attaches an optional `action` (label + handler) so the same single-slot
-  // toast can carry an Undo affordance without a second toast system. A nonce
-  // re-arms the auto-dismiss timer for the latest notice and lets the action
-  // path use a longer window (see showNotice).
-  //
-  // A11y: the toast lives in a PERSISTENT live region (always-mounted
-  // container; only its inner content swaps), so an announcement fires on each
-  // empty→full content change rather than racing the region's own mount. The
-  // optional `assertive` flag promotes the announcement to assertive/role=alert
-  // for the result of a destructive action (Block/Undo) while routine notices
-  // (e.g. "Video declined") stay polite.
-  type NoticeAction = { label: string; onAct: () => void };
-  type Notice = {
-    text: string;
-    action?: NoticeAction;
-    assertive?: boolean;
-    nonce: number;
-  };
-  const [notice, setNotice] = useState<Notice | null>(null);
-  const noticeNonce = useRef(0);
-  const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // Focus management for the Block→Undo safety net. After blockPeer(),
-  // teardown() unmounts ChatPanel and the focused Block button is destroyed,
-  // so focus would fall to <body> and the keyboard/SR user would have to
-  // blind-tab to find Undo within the 6s window. Instead we move focus to the
-  // Undo button when an action notice mounts (undoRef), and return focus to the
-  // map/main region (mainRef) on dismiss/timeout/after-Undo so it never rests
-  // on a removed node. A ref-flag tracks whether WE moved focus, so we only
-  // pull it back when we were the ones who placed it.
-  const undoRef = useRef<HTMLButtonElement | null>(null);
-  const mainRef = useRef<HTMLElement | null>(null);
-  const movedFocusForNotice = useRef(false);
-  // Terminal (unrecoverable) notice — distinct from the transient confirmation
-  // toast: it persists until the user acts (Reload) rather than auto-dismissing.
-  // Kept separate so showNotice()'s 3.5s path stays untouched.
-  const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
+  // Notice / toast system (transient confirmation toast + terminal notice +
+  // the Block→Undo focus safety net). The render keeps the JSX (live regions +
+  // visible toast) and reads `notice`/`terminalNotice`; callers raise notices
+  // via showNotice / showTerminalNotice. See useNotice for the a11y rationale.
+  const {
+    notice,
+    terminalNotice,
+    showNotice,
+    dismissNotice,
+    showTerminalNotice,
+    undoRef,
+    mainRef,
+  } = useNotice();
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  // Typing indicator. True while the peer is composing a message.
-  // Ephemeral peer-driven UI flag: set straight from the data-channel callback
-  // (onTyping), cleared on a real inbound message and on teardown. No ref mirror
-  // needed — it is only read in render, never inside an interval or callback.
-  const [peerTyping, setPeerTyping] = useState(false);
   const [myLocation, setMyLocation] = useState<{ lat: number; lng: number } | null>(
     null,
   );
@@ -100,84 +59,60 @@ export default function Home() {
   // Cleared on teardown so the next connection gets a fresh zoom.
   const [originPeer, setOriginPeer] = useState<{ lat: number; lng: number } | null>(null);
 
-  const [conn, _setConn] = useState<Conn>({ kind: "idle" });
-  const connRef = useRef<Conn>(conn);
-  const setConn = (c: Conn) => {
-    connRef.current = c;
-    _setConn(c);
-  };
+  const [conn, connRef, setConn] = useRefState<Conn>(initialConn);
+  // All connection transitions route through the pure connReducer (the state
+  // machine authority). dispatchConn reads the synchronous connRef so back-to-
+  // back dispatches within one tick compose correctly; setConn keeps the ref in
+  // sync. Side effects stay at the call sites, gated on the same guards.
+  // useCallback (over the stable setConn + connRef) so the incoming-expiry
+  // effect can depend on it without re-subscribing every render.
+  const dispatchConn = useCallback(
+    (action: Parameters<typeof connReducer>[1]) =>
+      setConn(connReducer(connRef.current, action)),
+    [setConn, connRef],
+  );
 
-  const [video, _setVideo] = useState<VideoState>("none");
-  const videoRef = useRef<VideoState>(video);
-  const setVideo = (v: VideoState) => {
-    videoRef.current = v;
-    _setVideo(v);
-  };
-
-  // Mute/camera controls. Track user's manual audio/video toggles.
-  // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
-  // the user WANTS sent (false = they clicked "turn off camera").
-  //
-  // Camera is mirrored into a ref because the presence gate (applyVideoGate) —
-  // which runs on every 2s heartbeat — must read the latest manual intent to
-  // decide whether to (re)enable the outgoing track. Without this, every
-  // heartbeat re-enabled video and overrode a manual camera-off. The outgoing
-  // video is now gated on BOTH mutual presence AND this manual intent.
-  const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOn, _setIsCameraOn] = useState(true);
-  const cameraOnRef = useRef(true);
-  const setIsCameraOn = (v: boolean) => {
-    cameraOnRef.current = v;
-    _setIsCameraOn(v);
-  };
-  // Peer's mute/camera state, set from inbound control messages.
-  const [peerMuted, setPeerMuted] = useState(false);
-  const [peerCameraOn, setPeerCameraOn] = useState(true);
-
-  // Camera filter (cosmetic colour-grade). Holds the EFFECTIVE preset id — the
-  // one PeerSession.setFilter() reported actually in effect — never the user's
-  // raw request. So if the browser can't build the canvas pipeline and the
-  // engine falls back to "none", this state reflects that honest fallback and
-  // the picker/self-view never claim a grade the peer isn't receiving. No
-  // persistence (no localStorage): each call starts at DEFAULT_FILTER_ID and
-  // teardown() resets it, consistent with the app's no-persistence model.
-  const [selectedFilter, setSelectedFilter] =
-    useState<FilterPresetId>(DEFAULT_FILTER_ID);
-
-  // ── Reciprocal Video presence state ──
-  // localAway: this tab has stepped away (hidden/pagehide). peerAway: the
-  // stranger has — fail-closed (assume away until the first heartbeat arrives).
-  // Mirrored into refs so the heartbeat interval and the data-channel control
-  // handler read the latest value without re-subscribing.
-  const [localAway, _setLocalAway] = useState(false);
-  const localAwayRef = useRef(false);
-  const setLocalAway = (v: boolean) => {
-    localAwayRef.current = v;
-    _setLocalAway(v);
-  };
-
-  const [peerAway, _setPeerAway] = useState(true);
-  const peerAwayRef = useRef(true);
-  const setPeerAway = (v: boolean) => {
-    peerAwayRef.current = v;
-    _setPeerAway(v);
-  };
-
-  const lastPeerPresentAt = useRef(0); // 0 = never heard from the peer yet
-  const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [video, videoRef, setVideo] = useRefState<VideoState>(initialVideo);
+  // Video transitions route through the pure videoReducer (mirrors dispatchConn).
+  const dispatchVideo = useCallback(
+    (action: Parameters<typeof videoReducer>[1]) =>
+      setVideo(videoReducer(videoRef.current, action)),
+    [setVideo, videoRef],
+  );
 
   const peerRef = useRef<PeerSession | null>(null);
-  const msgId = useRef(0);
-  // An EPHEMERAL, in-memory blocklist of peer ids the
-  // user has refused. Held in a ref ON PURPOSE: it is read synchronously inside
-  // the poll tick (to filter discovery) and inside processSignal (to auto-decline
-  // inbound requests), and it must NOT survive the tab. No state, no localStorage,
-  // no DB — a peer is identified by a per-page-load UUID, so this list dies with
-  // the session and a reloaded peer gets a fresh identity. That ceiling is stated
-  // honestly in the UI copy (see the Block button title + the toast). The two
-  // decisions over this set (discovery filter + auto-decline) live as pure
-  // helpers in lib/blocklist.ts so they're unit-testable without the page.
-  const blockedRef = useRef<Set<string>>(new Set());
+
+  // Chat over the P2P data channel: message list, typing indicator, and the
+  // Delivery Echo "Sent → Delivered" lifecycle. Receives the shared peerRef.
+  const chat = useChat(peerRef);
+  // Session-scoped, in-memory peer blocklist (discovery filter + auto-decline).
+  // Destructured so the poll effect can list the stable `filterPeers` callback
+  // directly (the linter tracks the object root, not `blocklist.filterPeers`).
+  const { block, unblock, isBlocked, filterPeers } = useBlocklist();
+  // Reciprocal-video privacy engine: the mutual-presence shield + the manual
+  // mute/camera controls. Owns the [video]-keyed presence effect, the outgoing-
+  // track gate, and the away/mute/camera state surfaced to VideoPanel. Receives
+  // the shared peerRef and the current video state (the effect runs only while
+  // "active").
+  const {
+    localAway,
+    peerAway,
+    isMuted,
+    isCameraOn,
+    peerMuted,
+    peerCameraOn,
+    selectedFilter,
+    toggleMute,
+    toggleCamera,
+    selectFilter,
+    notePeerPresent,
+    notePeerAway,
+    setPeerMuted,
+    setPeerCameraOn,
+    resetPresence,
+    resetControls,
+  } = useReciprocalVideo(peerRef, video);
+
   const requestTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   // Auto-dismiss timer for an INCOMING prompt the receiver never answers. The
   // requester gives up after REQUEST_TIMEOUT_MS and tears down its peer; without
@@ -204,94 +139,6 @@ export default function Home() {
     }
   }
 
-  // Show a transient toast. Pass an `action` to attach a single inline button
-  // (e.g. Undo) and `assertive` to promote the announcement for a destructive
-  // result. Re-arms a single shared timer so a newer notice always wins and an
-  // older one can't dismiss it early. Acting on (or being replaced) clears it.
-  // Wrapped in useCallback so it's a stable reference: it's read inside the
-  // incoming-prompt-expiry effect ([conn]) and we don't want that effect to
-  // re-subscribe on every render. It closes only over stable refs + setNotice,
-  // so an empty dep list is correct.
-  const showNotice = useCallback(
-    (
-      text: string,
-      opts?: { action?: NoticeAction; assertive?: boolean },
-    ) => {
-      const action = opts?.action;
-      const assertive = opts?.assertive;
-      const nonce = ++noticeNonce.current;
-      if (noticeTimer.current) clearTimeout(noticeTimer.current);
-      setNotice({ text, action, assertive, nonce });
-      noticeTimer.current = setTimeout(
-        () => {
-          // Only clear if no newer notice has superseded this one.
-          if (noticeNonce.current === nonce) setNotice(null);
-        },
-        action ? NOTICE_ACTION_MS : NOTICE_MS,
-      );
-    },
-    [],
-  );
-
-  // Return focus to the main/map region — but ONLY if we were the ones who
-  // moved it onto the toast (so we never yank focus from wherever the user
-  // legitimately put it). Used on dismiss, timeout, and after Undo fires.
-  function returnFocusToMain() {
-    if (movedFocusForNotice.current) {
-      movedFocusForNotice.current = false;
-      mainRef.current?.focus();
-    }
-  }
-
-  function dismissNotice() {
-    if (noticeTimer.current) clearTimeout(noticeTimer.current);
-    returnFocusToMain();
-    setNotice(null);
-  }
-
-  // When an ACTION notice (the Block→Undo toast) mounts, move focus onto
-  // its Undo button so the 6s window is reachable without a blind tab from
-  // <body> (ChatPanel having just unmounted). The persistent live region still
-  // announces the text; this only places focus. Non-action notices don't grab
-  // focus. When the notice clears, return focus to main if we placed it there.
-  //
-  // Keyed on the action notice's NONCE, not merely "has an action": if a second
-  // action toast supersedes a first within the window, hasAction would stay true
-  // and the effect would NOT re-run, leaving focus stranded on the prior (now
-  // removed) Undo button. The nonce changes per notice, so each new action toast
-  // re-runs the focus move onto ITS button. `null` while there's no action.
-  const actionNonce = notice?.action ? notice.nonce : null;
-  useEffect(() => {
-    if (actionNonce !== null) {
-      movedFocusForNotice.current = true;
-      // rAF so the button is laid out before we focus it.
-      const id = requestAnimationFrame(() => undoRef.current?.focus());
-      return () => cancelAnimationFrame(id);
-    }
-    // The action notice went away (timeout/replacement) without going through
-    // dismissNotice — return focus to main if it was ours to return.
-    returnFocusToMain();
-  }, [actionNonce]);
-
-  function addMessage(mine: boolean, text: string): number {
-    // createdAt is a CLIENT-ONLY wall-clock stamp (Date.now(), ms epoch) read
-    // solely by ChatPanel's Fade Trails decay. It is NOT sent over the wire,
-    // NOT persisted, and does NOT change a message's real lifetime — messages
-    // stay in-memory and are cleared on teardown.
-    //
-    // Delivery Echo: allocate the id BEFORE the setMessages closure so we can
-    // return it. The outbound send rides this SAME id on the wire ({t:"msg",
-    // id}); the peer echoes it back in an ack and onDelivered flips this exact
-    // message to Delivered by id. id is monotonic & session-local, never sent
-    // for incoming-tagging purposes beyond this.
-    const id = msgId.current++;
-    setMessages((prev) => [
-      ...prev,
-      { id, mine, text, createdAt: Date.now() },
-    ]);
-    return id;
-  }
-
   // Token-aware signal sender. Pulls the current token from the ref, and on a
   // 401 re-mints it once and retries so a rotated/expired token doesn't drop
   // the message silently.
@@ -316,49 +163,6 @@ export default function Home() {
     }
   }
 
-  // Gate the OUTGOING video track on mutual presence (the protective core).
-  // Cutting is instant — close the one-sided window immediately; resuming waits
-  // RESUME_DELAY_MS and re-checks mutual presence at fire time to avoid strobing
-  // on rapid flaps. Disabling the track yields black frames at the source, so an
-  // absent/lurking peer's recorder captures nothing recognizable.
-  function applyVideoGate() {
-    const ps = peerRef.current;
-    if (!ps) return;
-    if (resumeTimer.current) {
-      clearTimeout(resumeTimer.current);
-      resumeTimer.current = null;
-    }
-    // The outgoing video may only flow when BOTH the presence shield is
-    // satisfied (mutually present) AND the user hasn't manually turned their
-    // camera off. The manual intent is read from a ref so the 2s heartbeat,
-    // which calls this, never re-enables a track the user explicitly cut.
-    const mutuallyPresent = !localAwayRef.current && !peerAwayRef.current;
-    const shouldSend = mutuallyPresent && cameraOnRef.current;
-    if (!shouldSend) {
-      // Cutting is instant — manual-off or an absent peer both close the window
-      // immediately with no resume delay.
-      ps.setOutgoingVideoEnabled(false);
-    } else {
-      resumeTimer.current = setTimeout(() => {
-        resumeTimer.current = null;
-        if (!localAwayRef.current && !peerAwayRef.current && cameraOnRef.current) {
-          peerRef.current?.setOutgoingVideoEnabled(true);
-        }
-      }, RESUME_DELAY_MS);
-    }
-  }
-
-  // Reset all presence state so it never leaks into the next call.
-  function resetPresence() {
-    if (resumeTimer.current) {
-      clearTimeout(resumeTimer.current);
-      resumeTimer.current = null;
-    }
-    setLocalAway(false);
-    setPeerAway(true); // back to fail-closed for the next call
-    lastPeerPresentAt.current = 0;
-  }
-
   function teardown(message?: string) {
     if (requestTimer.current) clearTimeout(requestTimer.current);
     if (incomingTimer.current) clearTimeout(incomingTimer.current);
@@ -366,17 +170,12 @@ export default function Home() {
     peerRef.current = null;
     setLocalStream(null);
     setRemoteStream(null);
-    setVideo("none");
+    dispatchVideo({ type: "END" });
     resetPresence();
-    setPeerTyping(false);
-    setMessages([]);
+    chat.reset();
     setOriginPeer(null);
-    setIsMuted(false);
-    setIsCameraOn(true);
-    setPeerMuted(false);
-    setPeerCameraOn(true);
-    setSelectedFilter(DEFAULT_FILTER_ID);
-    setConn({ kind: "idle" });
+    resetControls();
+    dispatchConn({ type: "RESET" });
     if (message) showNotice(message);
   }
 
@@ -392,32 +191,10 @@ export default function Home() {
           onSignal: (type: DescType, payload: string) => {
             void emitSignal(peerId, type, payload);
           },
-          onChat: (text) => {
-            // A real message means they have stopped typing.
-            setPeerTyping(false);
-            addMessage(false, text);
-          },
-          onDelivered: (id) => {
-            // Delivery Echo (Story C): flip exactly the matching OUTBOUND
-            // message to delivered, matched BY ID (not array position). Pure
-            // functional update keyed on id makes it idempotent — a duplicate,
-            // stale, or foreign ack maps to an already-delivered or non-matching
-            // message and returns prev unchanged, so no re-render / re-animate.
-            // Order-independent: rapid-fire acks each land on their own id.
-            setMessages((prev) => {
-              let changed = false;
-              const next = prev.map((m) => {
-                if (m.id === id && m.mine && !m.delivered) {
-                  changed = true;
-                  return { ...m, delivered: true };
-                }
-                return m;
-              });
-              return changed ? next : prev;
-            });
-          },
+          onChat: (text) => chat.receiveMessage(text),
+          onDelivered: (id) => chat.markDelivered(id),
           onControl: (ctrl) => handleControl(ctrl),
-          onTyping: (on) => setPeerTyping(on),
+          onTyping: (on) => chat.setPeerTyping(on),
           onRemoteStream: (stream) => setRemoteStream(stream),
           onConnectionState: (state) => {
             if (state === "failed") {
@@ -425,7 +202,7 @@ export default function Home() {
             }
           },
           onChannelOpen: () => {
-            setConn({ kind: "connected", peerId });
+            dispatchConn({ type: "CHANNEL_OPEN", peerId });
           },
         },
         iceConfig,
@@ -436,58 +213,21 @@ export default function Home() {
     }
   }
 
-  function toggleMute() {
-    const ps = peerRef.current;
-    if (!ps) return;
-    const newMuted = !isMuted;
-    setIsMuted(newMuted);
-    ps.setOutgoingAudioEnabled(!newMuted);
-    ps.sendControl(newMuted ? "audio-mute" : "audio-unmute");
-  }
-
-  function toggleCamera() {
-    const ps = peerRef.current;
-    if (!ps) return;
-    const newCameraOn = !isCameraOn;
-    setIsCameraOn(newCameraOn);
-    // Route through the gate rather than toggling the track directly: it folds
-    // the new manual intent together with mutual presence, so turning the camera
-    // "on" while the peer is away stays shielded, and turning it "off" cuts
-    // instantly regardless of presence. cameraOnRef is already updated above.
-    applyVideoGate();
-    ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
-  }
-
-  // Pick a camera filter. Honest-state binding (hard requirement): we set React
-  // state from setFilter()'s RETURN VALUE — the EFFECTIVE id the engine applied,
-  // not the requested one. If the canvas pipeline can't be built the engine
-  // returns "none" and the picker + self-view fall back honestly, never showing
-  // a grade the peer isn't actually receiving. Guards a null peer exactly like
-  // toggleMute / toggleCamera. The SAME css string then drives the transmit
-  // canvas AND the self-view (via getFilterPreset in VideoPanel), so they can't
-  // drift. Cosmetic only: this never touches the presence/.enabled gate.
-  function selectFilter(id: FilterPresetId) {
-    const ps = peerRef.current;
-    if (!ps) return;
-    const effective = ps.setFilter(id);
-    setSelectedFilter(effective);
-  }
-
   function handleControl(ctrl: PeerControl) {
     const ps = peerRef.current;
     switch (ctrl) {
       case "video-request":
-        if (videoRef.current === "none") setVideo("incoming");
+        if (videoRef.current === "none") dispatchVideo({ type: "REQUEST_INCOMING" });
         break;
       case "video-accept":
         if (videoRef.current === "requesting" && ps) {
           ps.startVideo()
             .then((stream) => {
               setLocalStream(stream);
-              setVideo("active");
+              dispatchVideo({ type: "ACTIVATE" });
             })
             .catch(() => {
-              setVideo("none");
+              dispatchVideo({ type: "END" });
               ps.sendControl("video-end");
               showNotice("Camera unavailable.");
             });
@@ -495,7 +235,7 @@ export default function Home() {
         break;
       case "video-decline":
         if (videoRef.current === "requesting") {
-          setVideo("none");
+          dispatchVideo({ type: "END" });
           showNotice("Video declined.");
         }
         break;
@@ -503,23 +243,16 @@ export default function Home() {
         ps?.stopVideo();
         setLocalStream(null);
         setRemoteStream(null);
-        setVideo("none");
+        dispatchVideo({ type: "END" });
         resetPresence();
         break;
       case "presence-present":
         // The stranger's tab is active again (also the periodic heartbeat).
-        if (videoRef.current === "active") {
-          lastPeerPresentAt.current = Date.now();
-          if (peerAwayRef.current) setPeerAway(false);
-          applyVideoGateRef.current();
-        }
+        if (videoRef.current === "active") notePeerPresent();
         break;
       case "presence-away":
         // The stranger switched away — cut our outgoing feed immediately.
-        if (videoRef.current === "active") {
-          if (!peerAwayRef.current) setPeerAway(true);
-          applyVideoGateRef.current();
-        }
+        if (videoRef.current === "active") notePeerAway();
         break;
       case "audio-mute":
         setPeerMuted(true);
@@ -538,7 +271,7 @@ export default function Home() {
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
-    setConn({ kind: "requesting", peerId });
+    dispatchConn({ type: "REQUEST", peerId });
     void emitSignal(peerId, "request");
     requestTimer.current = setTimeout(() => {
       if (
@@ -566,14 +299,14 @@ export default function Home() {
     if (incomingPeer) setOriginPeer({ lat: incomingPeer.lat, lng: incomingPeer.lng });
     void startPeer(peerId, false);
     void emitSignal(peerId, "accept");
-    setConn({ kind: "connecting", peerId });
+    dispatchConn({ type: "ACCEPT_INCOMING", peerId });
   }
 
   function declineIncoming() {
     if (connRef.current.kind !== "incoming") return;
     if (incomingTimer.current) clearTimeout(incomingTimer.current);
     void emitSignal(connRef.current.peerId, "decline");
-    setConn({ kind: "idle" });
+    dispatchConn({ type: "RESET" });
   }
 
   function endConnection() {
@@ -601,7 +334,7 @@ export default function Home() {
     const c = connRef.current;
     if (c.kind !== "connecting" && c.kind !== "connected") return;
     const peerId = c.peerId;
-    blockedRef.current.add(peerId);
+    block(peerId);
     void emitSignal(peerId, "end");
     teardown();
     const sign = callSign(peerId);
@@ -612,7 +345,7 @@ export default function Home() {
         // Un-block ONLY — removing the id lets them reappear in discovery and
         // request again. It deliberately does NOT reconnect.
         onAct: () => {
-          blockedRef.current.delete(peerId);
+          unblock(peerId);
           showNotice(`Unblocked ${sign}`);
         },
       },
@@ -621,7 +354,7 @@ export default function Home() {
 
   function startVideoRequest() {
     if (videoRef.current !== "none" || !peerRef.current) return;
-    setVideo("requesting");
+    dispatchVideo({ type: "REQUEST_OUTGOING" });
     peerRef.current.sendControl("video-request");
   }
 
@@ -632,18 +365,18 @@ export default function Home() {
       .then((stream) => {
         setLocalStream(stream);
         ps.sendControl("video-accept");
-        setVideo("active");
+        dispatchVideo({ type: "ACTIVATE" });
       })
       .catch(() => {
         ps.sendControl("video-decline");
-        setVideo("none");
+        dispatchVideo({ type: "END" });
         showNotice("Camera unavailable.");
       });
   }
 
   function declineVideo() {
     peerRef.current?.sendControl("video-decline");
-    setVideo("none");
+    dispatchVideo({ type: "END" });
   }
 
   function endVideo() {
@@ -652,7 +385,7 @@ export default function Home() {
     ps?.sendControl("video-end");
     setLocalStream(null);
     setRemoteStream(null);
-    setVideo("none");
+    dispatchVideo({ type: "END" });
     resetPresence();
   }
 
@@ -664,12 +397,12 @@ export default function Home() {
         // produces, so it is indistinguishable from a normal decline — no
         // "you are blocked" signal is ever leaked to the peer. Checked first so
         // we never fall through to the busy path and double-emit decline.
-        if (isBlockedRequest(sig.fromId, blockedRef.current)) {
+        if (isBlocked(sig.fromId)) {
           void emitSignal(sig.fromId, "decline");
           break;
         }
         if (connRef.current.kind === "idle") {
-          setConn({ kind: "incoming", peerId: sig.fromId });
+          dispatchConn({ type: "INCOMING", peerId: sig.fromId });
         } else {
           void emitSignal(sig.fromId, "decline");
         }
@@ -680,7 +413,7 @@ export default function Home() {
         if (c.kind === "requesting" && c.peerId === sig.fromId) {
           if (requestTimer.current) clearTimeout(requestTimer.current);
           void startPeer(sig.fromId, true);
-          setConn({ kind: "connecting", peerId: sig.fromId });
+          dispatchConn({ type: "REMOTE_ACCEPT", peerId: sig.fromId });
           // Zoom fires for the initiator only now — when the OTHER party accepts.
           // Mirrors the moment acceptIncoming() fires setOriginPeer for the recipient.
           const acceptedPeer = peers.find((p) => p.id === sig.fromId);
@@ -718,7 +451,7 @@ export default function Home() {
             c.kind === "connected") &&
           c.peerId === sig.fromId
         ) {
-          if (c.kind === "incoming") setConn({ kind: "idle" });
+          if (c.kind === "incoming") dispatchConn({ type: "RESET" });
           else teardown("Stranger disconnected.");
         }
         break;
@@ -744,7 +477,7 @@ export default function Home() {
         connRef.current.kind === "incoming" &&
         connRef.current.peerId === peerId
       ) {
-        setConn({ kind: "idle" });
+        dispatchConn({ type: "RESET" });
         showNotice("That request expired.");
       }
     }, REQUEST_TIMEOUT_MS - 2_000);
@@ -754,16 +487,10 @@ export default function Home() {
         incomingTimer.current = null;
       }
     };
-    // showNotice is a stable useCallback, so listing it here is churn-free.
-  }, [conn, showNotice]);
-
-  // applyVideoGate is recreated each render; read it through a ref inside the
-  // heartbeat interval and the data-channel control handler so effect deps stay
-  // honest and the interval isn't torn down on every render.
-  const applyVideoGateRef = useRef(applyVideoGate);
-  useEffect(() => {
-    applyVideoGateRef.current = applyVideoGate;
-  });
+    // showNotice and dispatchConn are stable (useCallback); connRef is a stable
+    // useRefState ref. Listing them is churn-free — the effect still only
+    // re-runs on a conn change.
+  }, [conn, showNotice, dispatchConn, connRef]);
 
   // refreshToken closes over sessionId (stable) but is recreated each render;
   // read it through a ref inside the poll interval so the effect deps stay
@@ -795,11 +522,9 @@ export default function Home() {
       if (authFailures >= MAX_AUTH_FAILURES) {
         // Stop the loop — no reschedule. Surface a TERMINAL notice (persistent,
         // danger-tinted, with a Reload action) rather than a transient toast.
-        // FIX: the terminal notice takes precedence over any transient toast that
-        // may be mid-flight (both share the top-6 z-50 slot). Clear the transient
-        // notice so the two can never overlap at the same coordinate.
-        setNotice(null);
-        setTerminalNotice("Session expired. Reload the page to reconnect.");
+        // showTerminalNotice clears any mid-flight transient toast first so the
+        // two can never overlap at the same top-6 z-50 coordinate.
+        showTerminalNotice("Session expired. Reload the page to reconnect.");
         return;
       }
       await refreshTokenRef.current();
@@ -819,7 +544,7 @@ export default function Home() {
         authFailures = 0; // a clean poll clears the backoff
         // Exclude blocked peers from discovery entirely (map dots, the
         // accessible "Nearby signals" list, and the count all derive from this).
-        setPeers(filterBlockedPeers(data.peers, blockedRef.current));
+        setPeers(filterPeers(data.peers));
         for (const s of data.signals) processSignalRef.current(s);
       } catch (err) {
         if (err instanceof UnauthorizedError) {
@@ -838,7 +563,10 @@ export default function Home() {
       active = false;
       if (timer) clearTimeout(timer);
     };
-  }, [phase, sessionId]);
+    // showTerminalNotice and blocklist.filterPeers are stable hook returns, so
+    // listing them is churn-free — the loop still (re)starts only on a
+    // phase/session change.
+  }, [phase, sessionId, showTerminalNotice, filterPeers]);
 
   useEffect(() => {
     if (!sessionId || phase !== "live") return;
@@ -853,96 +581,6 @@ export default function Home() {
       window.removeEventListener("beforeunload", onLeave);
     };
   }, [sessionId, phase]);
-
-  // ── Reciprocal Video: mutual-presence privacy engine ──────────────────────
-  // While a video call is active, clear video is transmitted only while BOTH
-  // tabs are present. Either side switching away (tab hidden / pagehide) cuts
-  // the OUTGOING video at the source, so a present user can never watch or
-  // record a clear feed of an absent stranger. Audio is untouched. Presence is
-  // exchanged as data-channel heartbeats: a "presence-present" ping every
-  // HEARTBEAT_INTERVAL_MS while present, an explicit "presence-away" on going
-  // hidden, plus a fail-closed staleness check (no ping within
-  // HEARTBEAT_TIMEOUT_MS ⇒ peer treated as away) so a dropped channel can't leak
-  // a clear feed. Detection is tab visibility only — NOT gaze.
-  useEffect(() => {
-    if (video !== "active") return;
-    let awayTimer: ReturnType<typeof setTimeout> | undefined;
-
-    const goAway = () => {
-      awayTimer = undefined;
-      if (localAwayRef.current) return;
-      setLocalAway(true);
-      peerRef.current?.sendControl("presence-away");
-      applyVideoGateRef.current();
-    };
-
-    const comeBack = () => {
-      if (awayTimer) {
-        clearTimeout(awayTimer);
-        awayTimer = undefined;
-      }
-      if (localAwayRef.current) setLocalAway(false);
-      peerRef.current?.sendControl("presence-present");
-      applyVideoGateRef.current();
-    };
-
-    const onVisibility = () => {
-      if (document.visibilityState === "hidden") {
-        if (!awayTimer) awayTimer = setTimeout(goAway, AWAY_DEBOUNCE_MS);
-      } else {
-        comeBack();
-      }
-    };
-
-    // pagehide is the most dangerous "absent" state — cut instantly, no debounce.
-    const onPageHide = () => {
-      if (localAwayRef.current) return;
-      setLocalAway(true);
-      peerRef.current?.sendControl("presence-away");
-      applyVideoGateRef.current();
-    };
-
-    document.addEventListener("visibilitychange", onVisibility);
-    window.addEventListener("pagehide", onPageHide);
-    // beforeunload too, so a hard close/navigation cuts instantly rather than
-    // waiting out the ~HEARTBEAT_TIMEOUT_MS staleness window on the peer.
-    window.addEventListener("beforeunload", onPageHide);
-
-    // Announce presence immediately so the peer clears its fail-closed default
-    // within ~1 RTT instead of waiting a full heartbeat interval — otherwise the
-    // call would start with both feeds black for up to HEARTBEAT_INTERVAL_MS.
-    peerRef.current?.sendControl("presence-present");
-    // Enforce the initial gate: the peer starts fail-closed, so hold our video
-    // until the first heartbeat confirms mutual presence.
-    applyVideoGateRef.current();
-
-    const heartbeat = setInterval(() => {
-      if (!localAwayRef.current) {
-        peerRef.current?.sendControl("presence-present");
-      }
-      // Fail-closed staleness: peer silent past the timeout ⇒ treat as away.
-      const last = lastPeerPresentAt.current;
-      const stale = last === 0 || Date.now() - last > HEARTBEAT_TIMEOUT_MS;
-      if (stale && !peerAwayRef.current) {
-        setPeerAway(true);
-        applyVideoGateRef.current();
-      }
-    }, HEARTBEAT_INTERVAL_MS);
-
-    // If the tab is already hidden when the call starts, go away immediately —
-    // no debounce on the initial state (the debounce only guards mid-call flaps).
-    if (document.visibilityState === "hidden") {
-      goAway();
-    }
-
-    return () => {
-      document.removeEventListener("visibilitychange", onVisibility);
-      window.removeEventListener("pagehide", onPageHide);
-      window.removeEventListener("beforeunload", onPageHide);
-      clearInterval(heartbeat);
-      if (awayTimer) clearTimeout(awayTimer);
-    };
-  }, [video]);
 
   async function handleReady(lat: number, lng: number) {
     setMyLocation({ lat, lng });
@@ -964,7 +602,7 @@ export default function Home() {
 
   return (
     // tabIndex=-1 + ref so focus can be returned here (not <body>) after the
-    // Block→Undo toast is dismissed/timed-out — see returnFocusToMain.
+    // Block→Undo toast is dismissed/timed-out — see useNotice's focus net.
     <main ref={mainRef} tabIndex={-1} className="fixed inset-0 overflow-hidden outline-none">
       <WorldMap
         peers={
@@ -1145,30 +783,16 @@ export default function Home() {
 
       {inChat && (
         <ChatPanel
-          messages={messages}
+          messages={chat.messages}
           connected={conn.kind === "connected"}
           videoBusy={video !== "none"}
-          onSend={(text) => {
-            // Delivery Echo: append locally first so we own the id, then send
-            // that SAME id on the wire. The peer's ack echoes it back and flips
-            // this message to Delivered (onDelivered, by id). sendChat returns
-            // whether the frame actually went out over an open channel — only
-            // then do we mark the message "Sent" (honest: a no-op'd send on a
-            // closed channel claims nothing).
-            const id = addMessage(true, text);
-            const sent = peerRef.current?.sendChat(text, id) ?? false;
-            if (sent) {
-              setMessages((prev) =>
-                prev.map((m) => (m.id === id ? { ...m, sent: true } : m)),
-              );
-            }
-          }}
+          onSend={chat.sendMessage}
           onStartVideo={startVideoRequest}
           onEnd={endConnection}
           onBlock={blockPeer}
           peerId={activePeerId}
-          peerTyping={peerTyping}
-          onTyping={(on: boolean) => peerRef.current?.sendTyping(on)}
+          peerTyping={chat.peerTyping}
+          onTyping={chat.sendTyping}
         />
       )}
 

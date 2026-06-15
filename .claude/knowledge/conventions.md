@@ -602,6 +602,47 @@ const credential = turnServer.credential!; // We know it's not null (checked ear
 
 ---
 
+## Client State: Custom Hooks + Pure Reducers (added 2026-06-15)
+
+`app/page.tsx` was decomposed from a 1192-line god component into focused units.
+Two patterns are now the sanctioned house style for client state:
+
+### Custom hooks (`app/hooks/`, camelCase `useX.ts`)
+Extract a cohesive slice of `Home`'s state + behavior into a `useX` hook with a
+typed return interface. Existing hooks:
+- `useRefState<T>(initial)` → `[value, ref, setValue]` — state mirrored into a
+  ref updated **synchronously** in the setter. Use whenever a value is read
+  inside a long-lived closure (poll interval, presence heartbeat, data-channel
+  handler) that must not re-subscribe. The synchronous ref write is load-bearing.
+- `useNotice`, `useChat`, `useBlocklist`, `useReciprocalVideo` — feature slices.
+  The render keeps the JSX; the hook owns the state/handlers.
+
+### Pure reducers (`app/state/`, camelCase `xReducer.ts`)
+Formalize an informal state machine (a tagged-union `useState`) as a pure
+`xReducer(state, action)` with an explicit action union. The reducer is the
+state authority and enforces all guards; **side effects stay at the call sites**
+in page.tsx, gated on the same guards. Because the poll tick / signal handlers
+need synchronous reads, transitions route through a `dispatchX` that reads the
+synchronous `useRefState` ref and applies the reducer — NOT React's `useReducer`
+(which has no synchronous read). Existing: `connReducer`, `videoReducer`.
+
+### Effect dependency arrays
+When an effect references a hook return (a `useRefState` ref/setter, a
+`useCallback`, a destructured stable method), list it in the deps. These are
+referentially stable, so listing them satisfies `react-hooks/exhaustive-deps`
+without changing the effect's re-run trigger — add a comment saying so. Note:
+the linter only special-cases **direct** `useRef`/`useState` calls, so
+tuple-returned refs/setters from custom hooks DO get flagged; list them.
+
+### Lint note
+`eslint-plugin-react-hooks` v6 (React Compiler) includes `react-hooks/purity`.
+Passing a component function that calls `Date.now()` into a custom hook can trip
+it (it loses the render-vs-event-handler classification) — a `useLatestRef`
+helper was explored for the 3 "latest-callback" mirrors and dropped for this
+reason; those stay as inline `useRef` + `useEffect`.
+
+---
+
 ## References
 
 - **TypeScript Handbook:** https://www.typescriptlang.org/docs/
