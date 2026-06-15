@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import EntryGate from "./components/EntryGate";
 import WorldMap from "./components/WorldMap";
 import ConnectionPrompt from "./components/ConnectionPrompt";
@@ -15,12 +15,7 @@ import { useRefState } from "./hooks/useRefState";
 import { useNotice } from "./hooks/useNotice";
 import { useChat } from "./hooks/useChat";
 import { useBlocklist } from "./hooks/useBlocklist";
-type Conn =
-  | { kind: "idle" }
-  | { kind: "requesting"; peerId: string }
-  | { kind: "incoming"; peerId: string }
-  | { kind: "connecting"; peerId: string }
-  | { kind: "connected"; peerId: string };
+import { connReducer, initialConn, type Conn } from "./state/connReducer";
 
 type VideoState = "none" | "requesting" | "incoming" | "active";
 
@@ -66,7 +61,18 @@ export default function Home() {
   // Cleared on teardown so the next connection gets a fresh zoom.
   const [originPeer, setOriginPeer] = useState<{ lat: number; lng: number } | null>(null);
 
-  const [conn, connRef, setConn] = useRefState<Conn>({ kind: "idle" });
+  const [conn, connRef, setConn] = useRefState<Conn>(initialConn);
+  // All connection transitions route through the pure connReducer (the state
+  // machine authority). dispatchConn reads the synchronous connRef so back-to-
+  // back dispatches within one tick compose correctly; setConn keeps the ref in
+  // sync. Side effects stay at the call sites, gated on the same guards.
+  // useCallback (over the stable setConn + connRef) so the incoming-expiry
+  // effect can depend on it without re-subscribing every render.
+  const dispatchConn = useCallback(
+    (action: Parameters<typeof connReducer>[1]) =>
+      setConn(connReducer(connRef.current, action)),
+    [setConn, connRef],
+  );
 
   const [video, videoRef, setVideo] = useRefState<VideoState>("none");
 
@@ -217,7 +223,7 @@ export default function Home() {
     setIsCameraOn(true);
     setPeerMuted(false);
     setPeerCameraOn(true);
-    setConn({ kind: "idle" });
+    dispatchConn({ type: "RESET" });
     if (message) showNotice(message);
   }
 
@@ -244,7 +250,7 @@ export default function Home() {
             }
           },
           onChannelOpen: () => {
-            setConn({ kind: "connected", peerId });
+            dispatchConn({ type: "CHANNEL_OPEN", peerId });
           },
         },
         iceConfig,
@@ -342,7 +348,7 @@ export default function Home() {
 
   function requestConnection(peerId: string) {
     if (connRef.current.kind !== "idle") return;
-    setConn({ kind: "requesting", peerId });
+    dispatchConn({ type: "REQUEST", peerId });
     void emitSignal(peerId, "request");
     requestTimer.current = setTimeout(() => {
       if (
@@ -370,14 +376,14 @@ export default function Home() {
     if (incomingPeer) setOriginPeer({ lat: incomingPeer.lat, lng: incomingPeer.lng });
     void startPeer(peerId, false);
     void emitSignal(peerId, "accept");
-    setConn({ kind: "connecting", peerId });
+    dispatchConn({ type: "ACCEPT_INCOMING", peerId });
   }
 
   function declineIncoming() {
     if (connRef.current.kind !== "incoming") return;
     if (incomingTimer.current) clearTimeout(incomingTimer.current);
     void emitSignal(connRef.current.peerId, "decline");
-    setConn({ kind: "idle" });
+    dispatchConn({ type: "RESET" });
   }
 
   function endConnection() {
@@ -473,7 +479,7 @@ export default function Home() {
           break;
         }
         if (connRef.current.kind === "idle") {
-          setConn({ kind: "incoming", peerId: sig.fromId });
+          dispatchConn({ type: "INCOMING", peerId: sig.fromId });
         } else {
           void emitSignal(sig.fromId, "decline");
         }
@@ -484,7 +490,7 @@ export default function Home() {
         if (c.kind === "requesting" && c.peerId === sig.fromId) {
           if (requestTimer.current) clearTimeout(requestTimer.current);
           void startPeer(sig.fromId, true);
-          setConn({ kind: "connecting", peerId: sig.fromId });
+          dispatchConn({ type: "REMOTE_ACCEPT", peerId: sig.fromId });
           // Zoom fires for the initiator only now — when the OTHER party accepts.
           // Mirrors the moment acceptIncoming() fires setOriginPeer for the recipient.
           const acceptedPeer = peers.find((p) => p.id === sig.fromId);
@@ -522,7 +528,7 @@ export default function Home() {
             c.kind === "connected") &&
           c.peerId === sig.fromId
         ) {
-          if (c.kind === "incoming") setConn({ kind: "idle" });
+          if (c.kind === "incoming") dispatchConn({ type: "RESET" });
           else teardown("Stranger disconnected.");
         }
         break;
@@ -548,7 +554,7 @@ export default function Home() {
         connRef.current.kind === "incoming" &&
         connRef.current.peerId === peerId
       ) {
-        setConn({ kind: "idle" });
+        dispatchConn({ type: "RESET" });
         showNotice("That request expired.");
       }
     }, REQUEST_TIMEOUT_MS - 2_000);
@@ -558,10 +564,10 @@ export default function Home() {
         incomingTimer.current = null;
       }
     };
-    // showNotice is a stable useCallback; setConn (a useRefState setter) and
-    // connRef (a useRefState ref) are likewise stable hook returns, so listing
-    // them is churn-free — the effect still only re-runs on a conn change.
-  }, [conn, showNotice, setConn, connRef]);
+    // showNotice and dispatchConn are stable (useCallback); connRef is a stable
+    // useRefState ref. Listing them is churn-free — the effect still only
+    // re-runs on a conn change.
+  }, [conn, showNotice, dispatchConn, connRef]);
 
   // applyVideoGate is recreated each render; read it through a ref inside the
   // heartbeat interval and the data-channel control handler so effect deps stay
