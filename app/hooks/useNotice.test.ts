@@ -115,6 +115,40 @@ describe("useNotice", () => {
     expect(document.activeElement).toBe(main); // returned to main (we placed it)
   });
 
+  it("re-targets focus to the NEW Undo when a second action notice supersedes the first", () => {
+    const { result } = renderHook(() => useNotice());
+    const undoA = document.createElement("button");
+    const undoB = document.createElement("button");
+    const main = document.createElement("div");
+    main.tabIndex = -1;
+    document.body.append(undoA, undoB, main);
+    act(() => {
+      result.current.mainRef.current = main;
+    });
+
+    // First action notice → focus lands on Undo A.
+    act(() => {
+      result.current.undoRef.current = undoA;
+      result.current.showNotice("Blocked A", {
+        action: { label: "Undo", onAct: () => {} },
+        assertive: true,
+      });
+    });
+    expect(document.activeElement).toBe(undoA);
+
+    // A second action notice (new nonce) replaces it → focus must move to Undo B,
+    // not stay stranded on the removed Undo A. This is why the focus effect is
+    // keyed on the notice nonce, not merely "has an action".
+    act(() => {
+      result.current.undoRef.current = undoB;
+      result.current.showNotice("Blocked B", {
+        action: { label: "Undo", onAct: () => {} },
+        assertive: true,
+      });
+    });
+    expect(document.activeElement).toBe(undoB);
+  });
+
   it("does not yank focus for a plain (non-action) notice", () => {
     const { result } = renderHook(() => useNotice());
     const elsewhere = document.createElement("input");

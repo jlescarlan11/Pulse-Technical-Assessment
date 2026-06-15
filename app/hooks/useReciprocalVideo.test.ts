@@ -11,6 +11,7 @@
 import { act, renderHook } from "@testing-library/react";
 import { useReciprocalVideo } from "./useReciprocalVideo";
 import type { PeerSession } from "@/lib/webrtc";
+import type { VideoState } from "../state/videoReducer";
 
 function makePeerRef() {
   const setOutgoingVideoEnabled = jest.fn();
@@ -38,9 +39,9 @@ afterEach(() => {
 // Render the hook and transition into an active call (effect mounts).
 function renderActive(peerRef: ReturnType<typeof makePeerRef>["ref"]) {
   const view = renderHook(({ video }) => useReciprocalVideo(peerRef, video), {
-    initialProps: { video: "none" as const },
+    initialProps: { video: "none" as VideoState },
   });
-  act(() => view.rerender({ video: "active" as const }));
+  act(() => view.rerender({ video: "active" }));
   return view;
 }
 

@@ -134,9 +134,20 @@ jest.mock("./components/ChatPanel", () => ({
 
 jest.mock("./components/VideoPanel", () => ({
   __esModule: true,
-  default: ({ onEnd }: { onEnd: () => void }) => (
-    <div data-testid="video-panel">
+  // Surfaces the props the refactor moved into useReciprocalVideo so the test
+  // can verify page.tsx actually forwards them and wires the toggles.
+  default: ({
+    onEnd,
+    onToggleMute,
+    peerAway,
+  }: {
+    onEnd: () => void;
+    onToggleMute: () => void;
+    peerAway: boolean;
+  }) => (
+    <div data-testid="video-panel" data-peer-away={String(peerAway)}>
       <button onClick={onEnd}>video-end</button>
+      <button onClick={onToggleMute}>video-mute</button>
     </div>
   ),
 }));
@@ -239,5 +250,27 @@ describe("Home — reciprocal-video privacy gate (characterization)", () => {
       peerCb!.onControl("presence-away");
     });
     expect(gate).toHaveBeenCalledWith(false);
+  });
+
+  it("forwards reciprocal-video state/handlers from the hook through to VideoPanel", async () => {
+    await connect();
+    await act(async () => {
+      peerCb!.onControl("video-request");
+    });
+    fireEvent.click(screen.getByText("prompt-accept"));
+    await flush();
+
+    // peerAway (owned by useReciprocalVideo) is reflected onto VideoPanel: it
+    // starts fail-closed true, then flips false once the peer is present.
+    expect(screen.getByTestId("video-panel").dataset.peerAway).toBe("true");
+    await act(async () => {
+      peerCb!.onControl("presence-present");
+    });
+    expect(screen.getByTestId("video-panel").dataset.peerAway).toBe("false");
+
+    // The mute toggle is wired through to the hook → PeerSession.
+    fireEvent.click(screen.getByText("video-mute"));
+    expect(peerInstance!.setOutgoingAudioEnabled).toHaveBeenCalledWith(false);
+    expect(peerInstance!.sendControl).toHaveBeenCalledWith("audio-mute");
   });
 });
