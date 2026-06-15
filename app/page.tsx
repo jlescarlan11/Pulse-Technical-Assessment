@@ -12,6 +12,7 @@ import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 import { callSign } from "@/lib/callsign";
 import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
+import { useRefState } from "./hooks/useRefState";
 type Conn =
   | { kind: "idle" }
   | { kind: "requesting"; peerId: string }
@@ -99,19 +100,9 @@ export default function Home() {
   // Cleared on teardown so the next connection gets a fresh zoom.
   const [originPeer, setOriginPeer] = useState<{ lat: number; lng: number } | null>(null);
 
-  const [conn, _setConn] = useState<Conn>({ kind: "idle" });
-  const connRef = useRef<Conn>(conn);
-  const setConn = (c: Conn) => {
-    connRef.current = c;
-    _setConn(c);
-  };
+  const [conn, connRef, setConn] = useRefState<Conn>({ kind: "idle" });
 
-  const [video, _setVideo] = useState<VideoState>("none");
-  const videoRef = useRef<VideoState>(video);
-  const setVideo = (v: VideoState) => {
-    videoRef.current = v;
-    _setVideo(v);
-  };
+  const [video, videoRef, setVideo] = useRefState<VideoState>("none");
 
   // Mute/camera controls. Track user's manual audio/video toggles.
   // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
@@ -123,12 +114,7 @@ export default function Home() {
   // heartbeat re-enabled video and overrode a manual camera-off. The outgoing
   // video is now gated on BOTH mutual presence AND this manual intent.
   const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOn, _setIsCameraOn] = useState(true);
-  const cameraOnRef = useRef(true);
-  const setIsCameraOn = (v: boolean) => {
-    cameraOnRef.current = v;
-    _setIsCameraOn(v);
-  };
+  const [isCameraOn, cameraOnRef, setIsCameraOn] = useRefState(true);
   // Peer's mute/camera state, set from inbound control messages.
   const [peerMuted, setPeerMuted] = useState(false);
   const [peerCameraOn, setPeerCameraOn] = useState(true);
@@ -138,19 +124,11 @@ export default function Home() {
   // stranger has — fail-closed (assume away until the first heartbeat arrives).
   // Mirrored into refs so the heartbeat interval and the data-channel control
   // handler read the latest value without re-subscribing.
-  const [localAway, _setLocalAway] = useState(false);
-  const localAwayRef = useRef(false);
-  const setLocalAway = (v: boolean) => {
-    localAwayRef.current = v;
-    _setLocalAway(v);
-  };
+  const [localAway, localAwayRef, setLocalAway] = useRefState(false);
 
-  const [peerAway, _setPeerAway] = useState(true);
-  const peerAwayRef = useRef(true);
-  const setPeerAway = (v: boolean) => {
-    peerAwayRef.current = v;
-    _setPeerAway(v);
-  };
+  // peerAway seeds fail-closed (true): we assume the stranger is away until the
+  // first heartbeat proves otherwise, so no clear feed ever leaks at call start.
+  const [peerAway, peerAwayRef, setPeerAway] = useRefState(true);
 
   const lastPeerPresentAt = useRef(0); // 0 = never heard from the peer yet
   const resumeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -727,8 +705,10 @@ export default function Home() {
         incomingTimer.current = null;
       }
     };
-    // showNotice is a stable useCallback, so listing it here is churn-free.
-  }, [conn, showNotice]);
+    // showNotice is a stable useCallback; setConn (a useRefState setter) and
+    // connRef (a useRefState ref) are likewise stable hook returns, so listing
+    // them is churn-free — the effect still only re-runs on a conn change.
+  }, [conn, showNotice, setConn, connRef]);
 
   // applyVideoGate is recreated each render; read it through a ref inside the
   // heartbeat interval and the data-channel control handler so effect deps stay
@@ -915,7 +895,12 @@ export default function Home() {
       clearInterval(heartbeat);
       if (awayTimer) clearTimeout(awayTimer);
     };
-  }, [video]);
+    // CRITICAL: this effect must re-run ONLY when `video` changes — re-running
+    // re-arms the heartbeat and re-sends presence. setLocalAway/setPeerAway
+    // (useRefState setters) and localAwayRef/peerAwayRef (useRefState refs) are
+    // all referentially stable hook returns, so adding them satisfies
+    // exhaustive-deps WITHOUT introducing an extra re-run trigger.
+  }, [video, setLocalAway, setPeerAway, localAwayRef, peerAwayRef]);
 
   async function handleReady(lat: number, lng: number) {
     setMyLocation({ lat, lng });
