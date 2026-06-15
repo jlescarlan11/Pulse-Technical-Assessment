@@ -11,7 +11,15 @@ export type PeerControl =
   // heartbeat (fail-closed: a peer is treated as away until one arrives and if
   // they stop arriving); "presence-away" is the explicit instant cut.
   | "presence-present"
-  | "presence-away";
+  | "presence-away"
+  // Phase 5 "Mute & Camera Controls". Sent over data channel via sendControl()
+  // to signal user-initiated mute/unmute and manual camera on/off (distinct
+  // from presence-gating). "audio-mute/unmute" gates outgoing audio tracks;
+  // "video-manual-off/on" gates outgoing video independently of presence.
+  | "audio-mute"
+  | "audio-unmute"
+  | "video-manual-off"
+  | "video-manual-on";
 
 export interface TurnCredentialsResponse {
   urls: string[];
@@ -387,6 +395,14 @@ export class PeerSession {
     }
     for (const sender of this.pc.getSenders()) {
       if (sender.track && sender.track.kind === "video") {
+        sender.track.enabled = enabled;
+      }
+    }
+  }
+
+  setOutgoingAudioEnabled(enabled: boolean): void {
+    for (const sender of this.pc.getSenders()) {
+      if (sender.track && sender.track.kind === "audio") {
         sender.track.enabled = enabled;
       }
     }

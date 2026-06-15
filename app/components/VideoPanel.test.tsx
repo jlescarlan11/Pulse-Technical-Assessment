@@ -238,8 +238,8 @@ describe("VideoPanel pre-call waiting state", () => {
       expect(
         screen.getByText("You can leave anytime with End video below."),
       ).toBeInTheDocument();
-      // The End control is force-shown in the pre-stream state.
-      expect(screen.getByText("End video")).toBeInTheDocument();
+      // The End control is force-shown in the pre-stream state (icon-only button).
+      expect(screen.getByLabelText("End video call")).toBeInTheDocument();
     } finally {
       jest.useRealTimers();
     }

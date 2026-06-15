@@ -68,6 +68,15 @@ const COPY = {
   announcePeerAway: "Stranger stepped away. Your video is no longer shared with them while they’re away.",
   announcePeerBack: "Stranger is back. Your video is shared again.",
   announceLocalBack: "You’re back. Your video is shared again.",
+
+  // Phase 5 — mute and camera controls. Honest copy: states what is sent/not sent,
+  // never privacy theater ("your audio is secure"). Simple icon+label, no wrapping.
+  muteLabel: "Mute",
+  unmuteLabel: "Unmute",
+  cameraOffLabel: "Turn off camera",
+  cameraOnLabel: "Turn on camera",
+  peerMutedBadge: "Muted",
+  peerCameraOffBadge: "Camera off",
 } as const;
 
 type VideoPanelProps = {
@@ -86,6 +95,24 @@ type VideoPanelProps = {
    * showing your camera — only the feed sent to the peer is held.
    */
   localAway: boolean;
+  /**
+   * Phase 5 — user manually muted audio (independent of presence gating).
+   */
+  isMuted: boolean;
+  onToggleMute: () => void;
+  /**
+   * Phase 5 — user manually turned off camera (independent of presence gating).
+   */
+  isCameraOn: boolean;
+  onToggleCamera: () => void;
+  /**
+   * Peer's mute state, received via control messages.
+   */
+  peerMuted: boolean;
+  /**
+   * Peer's camera state, received via control messages.
+   */
+  peerCameraOn: boolean;
 };
 
 export default function VideoPanel({
@@ -94,6 +121,12 @@ export default function VideoPanel({
   onEnd,
   peerAway,
   localAway,
+  isMuted,
+  onToggleMute,
+  isCameraOn,
+  onToggleCamera,
+  peerMuted,
+  peerCameraOn,
 }: VideoPanelProps) {
   const localRef = useRef<HTMLVideoElement>(null);
   const remoteRef = useRef<HTMLVideoElement>(null);
@@ -344,6 +377,39 @@ export default function VideoPanel({
           </div>
         )}
 
+        {/* Phase 5 — peer's mute/camera badges. Compact pill overlays in the
+            top-left (mute badge) and top-right (camera badge) of the remote
+            video area. These sit OUTSIDE the auto-calm region so they're always
+            visible without needing controls to be up. Icon + label, same honest
+            framing as local badges. */}
+        {remoteStream && (
+          <>
+            {peerMuted && (
+              <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
+                <svg className="h-3 w-3 shrink-0 text-haze-100" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path d="M12 2c-1.1 0-2 .9-2 2v7c0 1.1.9 2 2 2s2-.9 2-2V4c0-1.1-.9-2-2-2z" fill="currentColor" opacity="0.5" />
+                  <path d="M17 16c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92v2.08h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z" fill="currentColor" opacity="0.5" />
+                  <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+                <span className="truncate font-mono text-[10px] uppercase tracking-wider text-haze-100">
+                  {COPY.peerMutedBadge}
+                </span>
+              </div>
+            )}
+            {!peerCameraOn && (
+              <div className="pointer-events-none absolute right-4 top-4 flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
+                <svg className="h-3 w-3 shrink-0 text-haze-100" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+                  <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2z" opacity="0.5" />
+                  <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                </svg>
+                <span className="truncate font-mono text-[10px] uppercase tracking-wider text-haze-100">
+                  {COPY.peerCameraOffBadge}
+                </span>
+              </div>
+            )}
+          </>
+        )}
+
         {/* Top scrim + presence indicator (auto-calms with controls).
             M5 — the pill reflects presence so the HUD agrees with the overlay:
             mutually present => pulsing "Live" (danger dot); stranger away =>
@@ -427,17 +493,60 @@ export default function VideoPanel({
 
       {/* Control bar — auto-calms, reappears on interaction or focus. While any
           stepped-away overlay is up (m1) controlsVisible is forced true, so the
-          End button stays reachable. */}
+          buttons stay reachable. Three buttons: Mute, Camera, End — left to right,
+          with Mute and Camera using neutral accent (signal-green), End using danger-red. */}
       <div
-        className={`absolute inset-x-0 bottom-0 flex justify-center bg-gradient-to-t from-ink-950 to-transparent p-6 transition-all duration-500 ease-[var(--ease-calm)] focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${
+        className={`absolute inset-x-0 bottom-0 flex justify-center gap-3 bg-gradient-to-t from-ink-950 to-transparent p-6 transition-all duration-500 ease-[var(--ease-calm)] focus-within:pointer-events-auto focus-within:translate-y-0 focus-within:opacity-100 ${
           controlsVisible
             ? "translate-y-0 opacity-100"
             : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
+        {/* Mute button */}
+        <button
+          onClick={onToggleMute}
+          aria-pressed={isMuted}
+          aria-label={isMuted ? COPY.unmuteLabel : COPY.muteLabel}
+          className="flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
+        >
+          {isMuted ? (
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M12 2c-1.1 0-2 .9-2 2v7c0 1.1.9 2 2 2s2-.9 2-2V4c0-1.1-.9-2-2-2z" fill="currentColor" />
+              <path d="M17 16c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92v2.08h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z" fill="currentColor" opacity="0.5" />
+              <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          ) : (
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+              <path d="M12 2c-1.1 0-2 .9-2 2v7c0 1.1.9 2 2 2s2-.9 2-2V4c0-1.1-.9-2-2-2z" />
+              <path d="M17 16c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92v2.08h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z" />
+            </svg>
+          )}
+        </button>
+
+        {/* Camera toggle button */}
+        <button
+          onClick={onToggleCamera}
+          aria-pressed={isCameraOn}
+          aria-label={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
+          className="flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
+        >
+          {isCameraOn ? (
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+              <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zm-5-10.5l-3-3-5 6.5 3 3 5-6.5z" />
+            </svg>
+          ) : (
+            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
+              <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2z" opacity="0.5" />
+              <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          )}
+        </button>
+
+        {/* End video button (danger color) */}
         <button
           onClick={onEnd}
-          className="flex items-center gap-2.5 rounded-full bg-danger px-7 py-3.5 font-semibold text-white shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-danger-400 active:scale-95"
+          className="flex h-14 w-14 items-center justify-center rounded-full bg-danger px-7 py-3.5 font-semibold text-white shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-danger-400 active:scale-95"
+          aria-label="End video call"
         >
           <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
             <path
@@ -445,7 +554,6 @@ export default function VideoPanel({
               fill="currentColor"
             />
           </svg>
-          End video
         </button>
       </div>
     </div>

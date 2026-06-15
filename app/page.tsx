@@ -113,6 +113,16 @@ export default function Home() {
     _setVideo(v);
   };
 
+  // Phase 5 — mute/camera controls. Track user's manual audio/video toggles.
+  // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
+  // enabled (user didn't click "turn off camera"). These are independent of
+  // presence-gating (peerAway/localAway), which runs in parallel.
+  const [isMuted, setIsMuted] = useState(false);
+  const [isCameraOn, setIsCameraOn] = useState(true);
+  // Peer's mute/camera state, set from inbound control messages.
+  const [peerMuted, setPeerMuted] = useState(false);
+  const [peerCameraOn, setPeerCameraOn] = useState(true);
+
   // ── Reciprocal Video presence state ──
   // localAway: this tab has stepped away (hidden/pagehide). peerAway: the
   // stranger has — fail-closed (assume away until the first heartbeat arrives).
@@ -333,6 +343,10 @@ export default function Home() {
     setPeerTyping(false);
     setMessages([]);
     setOriginPeer(null);
+    setIsMuted(false);
+    setIsCameraOn(true);
+    setPeerMuted(false);
+    setPeerCameraOn(true);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
   }
@@ -393,6 +407,24 @@ export default function Home() {
     }
   }
 
+  function toggleMute() {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    ps.setOutgoingAudioEnabled(!newMuted);
+    ps.sendControl(newMuted ? "audio-mute" : "audio-unmute");
+  }
+
+  function toggleCamera() {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const newCameraOn = !isCameraOn;
+    setIsCameraOn(newCameraOn);
+    ps.setOutgoingVideoEnabled(newCameraOn);
+    ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
+  }
+
   function handleControl(ctrl: PeerControl) {
     const ps = peerRef.current;
     switch (ctrl) {
@@ -440,6 +472,18 @@ export default function Home() {
           if (!peerAwayRef.current) setPeerAway(true);
           applyVideoGateRef.current();
         }
+        break;
+      case "audio-mute":
+        setPeerMuted(true);
+        break;
+      case "audio-unmute":
+        setPeerMuted(false);
+        break;
+      case "video-manual-off":
+        setPeerCameraOn(false);
+        break;
+      case "video-manual-on":
+        setPeerCameraOn(true);
         break;
     }
   }
@@ -1113,6 +1157,12 @@ export default function Home() {
           onEnd={endVideo}
           peerAway={peerAway}
           localAway={localAway}
+          isMuted={isMuted}
+          onToggleMute={toggleMute}
+          isCameraOn={isCameraOn}
+          onToggleCamera={toggleCamera}
+          peerMuted={peerMuted}
+          peerCameraOn={peerCameraOn}
         />
       )}
 
