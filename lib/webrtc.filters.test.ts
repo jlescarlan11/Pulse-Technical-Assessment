@@ -310,6 +310,28 @@ describe("PeerSession.setFilter — none-bypass (zero cost at rest)", () => {
   });
 });
 
+// --- regression: zero-dimension camera settings ----------------------------
+
+describe("PeerSession.setFilter — canvas sizing guard (BUG-1 regression)", () => {
+  it("falls back to 640x480 when getSettings() reports 0 width/height", async () => {
+    // Some drivers / virtual cameras report width:0,height:0 transiently before
+    // the first frame. A `?? 640` fallback would KEEP the 0 (0 is not nullish),
+    // giving a 0x0 canvas whose captureStream emits a black/empty track. The
+    // truthy `|| 640` fallback must coerce 0 to a sane size so the filtered feed
+    // is real, not black.
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const video = makeTrack("video");
+    video.getSettings = () => ({ width: 0, height: 0 });
+    const ps = await sessionWithTracks([video, makeTrack("audio")]);
+
+    ps.setFilter("warm");
+
+    expect(created.canvases).toHaveLength(1);
+    expect(created.canvases[0].width).toBe(640);
+    expect(created.canvases[0].height).toBe(480);
+  });
+});
+
 // --- active filter: swap + gate inheritance --------------------------------
 
 describe("PeerSession.setFilter — activating a grade", () => {

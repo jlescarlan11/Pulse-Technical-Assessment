@@ -490,9 +490,13 @@ export class PeerSession {
   setFilter(presetId: string): FilterPresetId {
     const preset = getFilterPreset(presetId); // unknown ids => "none"
 
-    // No video yet: just record the intent. startVideo()/the next setFilter will
-    // honor it, and there is nothing to swap. Report the requested grade since
-    // no pipeline could have failed.
+    // No video yet: there is no track to swap, so just latch the requested grade
+    // into our state and return it. In practice this is unreachable — the picker
+    // only mounts while video === "active" (so startVideo() has already run and
+    // rawClone exists), and selectFilter() guards a null peer. It stays as a
+    // defensive coherent-state path: note that startVideo() does NOT replay this
+    // latch, so a grade is only ever actually transmitted via a setFilter() call
+    // made once video is live.
     if (!this.rawClone) {
       this.activeFilterId = preset.id;
       this.filterCss = preset.css;
@@ -603,8 +607,13 @@ export class PeerSession {
     void sourceVideo.play?.().catch(() => {});
 
     const settings = this.localStream.getVideoTracks()[0]?.getSettings?.();
-    const width = settings?.width ?? 640;
-    const height = settings?.height ?? 480;
+    // Truthy fallback (|| not ??) ON PURPOSE: some drivers/virtual cameras
+    // report width/height of 0 transiently before the first frame is produced.
+    // `?? 640` would KEEP that 0 (0 is not nullish), yielding a 0x0 canvas whose
+    // captureStream emits an empty/black track — a broken filtered feed. `|| 640`
+    // treats 0 (and NaN) as "no usable dimension" and falls back to a sane size.
+    const width = settings?.width || 640;
+    const height = settings?.height || 480;
     canvas.width = width;
     canvas.height = height;
 
