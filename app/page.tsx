@@ -115,10 +115,20 @@ export default function Home() {
 
   // Phase 5 — mute/camera controls. Track user's manual audio/video toggles.
   // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
-  // enabled (user didn't click "turn off camera"). These are independent of
-  // presence-gating (peerAway/localAway), which runs in parallel.
+  // the user WANTS sent (false = they clicked "turn off camera").
+  //
+  // Camera is mirrored into a ref because the presence gate (applyVideoGate) —
+  // which runs on every 2s heartbeat — must read the latest manual intent to
+  // decide whether to (re)enable the outgoing track. Without this, every
+  // heartbeat re-enabled video and overrode a manual camera-off. The outgoing
+  // video is now gated on BOTH mutual presence AND this manual intent.
   const [isMuted, setIsMuted] = useState(false);
-  const [isCameraOn, setIsCameraOn] = useState(true);
+  const [isCameraOn, _setIsCameraOn] = useState(true);
+  const cameraOnRef = useRef(true);
+  const setIsCameraOn = (v: boolean) => {
+    cameraOnRef.current = v;
+    _setIsCameraOn(v);
+  };
   // Peer's mute/camera state, set from inbound control messages.
   const [peerMuted, setPeerMuted] = useState(false);
   const [peerCameraOn, setPeerCameraOn] = useState(true);
@@ -307,13 +317,20 @@ export default function Home() {
       clearTimeout(resumeTimer.current);
       resumeTimer.current = null;
     }
+    // The outgoing video may only flow when BOTH the presence shield is
+    // satisfied (mutually present) AND the user hasn't manually turned their
+    // camera off. The manual intent is read from a ref so the 2s heartbeat,
+    // which calls this, never re-enables a track the user explicitly cut.
     const mutuallyPresent = !localAwayRef.current && !peerAwayRef.current;
-    if (!mutuallyPresent) {
+    const shouldSend = mutuallyPresent && cameraOnRef.current;
+    if (!shouldSend) {
+      // Cutting is instant — manual-off or an absent peer both close the window
+      // immediately with no resume delay.
       ps.setOutgoingVideoEnabled(false);
     } else {
       resumeTimer.current = setTimeout(() => {
         resumeTimer.current = null;
-        if (!localAwayRef.current && !peerAwayRef.current) {
+        if (!localAwayRef.current && !peerAwayRef.current && cameraOnRef.current) {
           peerRef.current?.setOutgoingVideoEnabled(true);
         }
       }, RESUME_DELAY_MS);
@@ -421,7 +438,11 @@ export default function Home() {
     if (!ps) return;
     const newCameraOn = !isCameraOn;
     setIsCameraOn(newCameraOn);
-    ps.setOutgoingVideoEnabled(newCameraOn);
+    // Route through the gate rather than toggling the track directly: it folds
+    // the new manual intent together with mutual presence, so turning the camera
+    // "on" while the peer is away stays shielded, and turning it "off" cuts
+    // instantly regardless of presence. cameraOnRef is already updated above.
+    applyVideoGate();
     ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
   }
 

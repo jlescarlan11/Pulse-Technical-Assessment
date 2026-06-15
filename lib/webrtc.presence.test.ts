@@ -244,6 +244,73 @@ describe("PeerSession.setOutgoingVideoEnabled (presence shield core)", () => {
 });
 
 // ---------------------------------------------------------------------------
+// Phase 5: manual audio mute. setOutgoingAudioEnabled gates the SENT audio
+// track so a muted user transmits silence. Audio is added directly (not
+// cloned), so the sender's track IS the original — disabling it is what the
+// peer hears as silence. Unlike video, audio has no presence gate, so a manual
+// mute is the only thing that ever flips it.
+// ---------------------------------------------------------------------------
+describe("PeerSession.setOutgoingAudioEnabled (manual mute)", () => {
+  it("disables the outgoing audio track when set to false", async () => {
+    const video = makeTrack("video");
+    const audio = makeTrack("audio");
+    const ps = await sessionWithTracks([video, audio]);
+
+    ps.setOutgoingAudioEnabled(false);
+
+    // The peer hears silence: the transmitted audio track is disabled.
+    expect(audio.enabled).toBe(false);
+  });
+
+  it("re-enables the outgoing audio track when set back to true", async () => {
+    const audio = makeTrack("audio");
+    const ps = await sessionWithTracks([makeTrack("video"), audio]);
+
+    ps.setOutgoingAudioEnabled(false);
+    expect(audio.enabled).toBe(false);
+
+    ps.setOutgoingAudioEnabled(true);
+    expect(audio.enabled).toBe(true);
+  });
+
+  it("does NOT touch the video track when muting audio", async () => {
+    const video = makeTrack("video");
+    const audio = makeTrack("audio");
+    const ps = await sessionWithTracks([video, audio]);
+
+    // Video is born gated; bring it live so we can prove mute leaves it alone.
+    ps.setOutgoingVideoEnabled(true);
+    expect(sentClone(video).enabled).toBe(true);
+
+    ps.setOutgoingAudioEnabled(false);
+
+    // Muting audio must never black the video feed (independent controls).
+    expect(sentClone(video).enabled).toBe(true);
+    expect(video.enabled).toBe(true);
+  });
+
+  it("is a no-op (no throw) when no audio track exists yet", () => {
+    installFakes(null);
+    const ps = new PeerSession(true, noopCallbacks);
+
+    expect(() => ps.setOutgoingAudioEnabled(false)).not.toThrow();
+    expect(() => ps.setOutgoingAudioEnabled(true)).not.toThrow();
+  });
+
+  it("toggles deterministically across repeated mute/unmute cycles", async () => {
+    const audio = makeTrack("audio");
+    const ps = await sessionWithTracks([makeTrack("video"), audio]);
+
+    for (let i = 0; i < 5; i++) {
+      ps.setOutgoingAudioEnabled(false);
+      expect(audio.enabled).toBe(false);
+      ps.setOutgoingAudioEnabled(true);
+      expect(audio.enabled).toBe(true);
+    }
+  });
+});
+
+// ---------------------------------------------------------------------------
 // FINDING 1: inbound typing data-channel branch (dc.onmessage -> onTyping)
 // ---------------------------------------------------------------------------
 //

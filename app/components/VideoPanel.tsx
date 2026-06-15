@@ -386,10 +386,23 @@ export default function VideoPanel({
           <>
             {peerMuted && (
               <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
-                <svg className="h-3 w-3 shrink-0 text-haze-100" viewBox="0 0 24 24" fill="none" aria-hidden>
-                  <path d="M12 2c-1.1 0-2 .9-2 2v7c0 1.1.9 2 2 2s2-.9 2-2V4c0-1.1-.9-2-2-2z" fill="currentColor" opacity="0.5" />
-                  <path d="M17 16c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92v2.08h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z" fill="currentColor" opacity="0.5" />
-                  <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                <svg
+                  className="h-3.5 w-3.5 shrink-0 text-haze-100"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  {/* Mic-off (Lucide), matches the control bar mute icon */}
+                  <line x1="2" y1="2" x2="22" y2="22" />
+                  <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
+                  <path d="M5 10v2a7 7 0 0 0 12 5" />
+                  <path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" />
+                  <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
+                  <line x1="12" y1="19" x2="12" y2="22" />
                 </svg>
                 <span className="truncate font-mono text-[10px] uppercase tracking-wider text-haze-100">
                   {COPY.peerMutedBadge}
@@ -398,9 +411,20 @@ export default function VideoPanel({
             )}
             {!peerCameraOn && (
               <div className="pointer-events-none absolute right-4 top-4 flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
-                <svg className="h-3 w-3 shrink-0 text-haze-100" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-                  <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2z" opacity="0.5" />
-                  <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="1.2" strokeLinecap="round" />
+                <svg
+                  className="h-3.5 w-3.5 shrink-0 text-haze-100"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden
+                >
+                  {/* Video-off (Lucide), matches the control bar camera icon */}
+                  <path d="M10.66 6H14a2 2 0 0 1 2 2v2.34l1 1L22 8v8" />
+                  <path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2l10 10z" />
+                  <line x1="2" y1="2" x2="22" y2="22" />
                 </svg>
                 <span className="truncate font-mono text-[10px] uppercase tracking-wider text-haze-100">
                   {COPY.peerCameraOffBadge}
@@ -502,44 +526,100 @@ export default function VideoPanel({
             : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
-        {/* Mute button */}
+        {/* Mute button — distinctive filled mic icon with slash on mute */}
         <button
           onClick={onToggleMute}
           aria-pressed={isMuted}
           aria-label={isMuted ? COPY.unmuteLabel : COPY.muteLabel}
-          className="flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
+          title={isMuted ? COPY.unmuteLabel : COPY.muteLabel}
+          className="group relative flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
         >
           {isMuted ? (
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M12 2c-1.1 0-2 .9-2 2v7c0 1.1.9 2 2 2s2-.9 2-2V4c0-1.1-.9-2-2-2z" fill="currentColor" />
-              <path d="M17 16c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92v2.08h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z" fill="currentColor" opacity="0.5" />
-              <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {/* Mic-off (Lucide): clean mic with a slash through it */}
+              <line x1="2" y1="2" x2="22" y2="22" />
+              <path d="M18.89 13.23A7.12 7.12 0 0 0 19 12v-2" />
+              <path d="M5 10v2a7 7 0 0 0 12 5" />
+              <path d="M15 9.34V5a3 3 0 0 0-5.68-1.33" />
+              <path d="M9 9v3a3 3 0 0 0 5.12 2.12" />
+              <line x1="12" y1="19" x2="12" y2="22" />
             </svg>
           ) : (
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-              <path d="M12 2c-1.1 0-2 .9-2 2v7c0 1.1.9 2 2 2s2-.9 2-2V4c0-1.1-.9-2-2-2z" />
-              <path d="M17 16c0 2.76-2.24 5-5 5s-5-2.24-5-5H5c0 3.53 2.61 6.43 6 6.92v2.08h2v-2.08c3.39-.49 6-3.39 6-6.92h-2z" />
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {/* Mic on (Lucide): capsule + arc + stand */}
+              <rect x="9" y="2" width="6" height="11" rx="3" />
+              <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+              <line x1="12" y1="19" x2="12" y2="22" />
             </svg>
           )}
+          {/* Hover label tooltip */}
+          <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            {isMuted ? COPY.unmuteLabel : COPY.muteLabel}
+          </span>
         </button>
 
-        {/* Camera toggle button */}
+        {/* Camera toggle button — distinctive filled camera icon with slash on off */}
         <button
           onClick={onToggleCamera}
           aria-pressed={isCameraOn}
           aria-label={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
-          className="flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
+          title={isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
+          className="group relative flex h-14 w-14 items-center justify-center rounded-full bg-signal/20 text-signal shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-signal/30 active:scale-95"
         >
           {isCameraOn ? (
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-              <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2zm-5-10.5l-3-3-5 6.5 3 3 5-6.5z" />
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {/* Video on (Lucide): camera body + lens prism */}
+              <path d="M22 8l-6 4 6 4V8z" />
+              <rect x="2" y="6" width="14" height="12" rx="2" />
             </svg>
           ) : (
-            <svg className="h-5 w-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
-              <path d="M21 19V5c0-1.1-.9-2-2-2H5c-1.1 0-2 .9-2 2v14c0 1.1.9 2 2 2h14c1.1 0 2-.9 2-2z" opacity="0.5" />
-              <path d="M2.5 2.5l19 19" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              {/* Video off (Lucide): camera with a slash through it */}
+              <path d="M10.66 6H14a2 2 0 0 1 2 2v2.34l1 1L22 8v8" />
+              <path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2l10 10z" />
+              <line x1="2" y1="2" x2="22" y2="22" />
             </svg>
           )}
+          {/* Hover label tooltip */}
+          <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            {isCameraOn ? COPY.cameraOffLabel : COPY.cameraOnLabel}
+          </span>
         </button>
 
         {/* End video button (danger color) */}
