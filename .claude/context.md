@@ -122,7 +122,6 @@ Pulse-Technical-Assessment/
 ├── package-lock.json
 ├── README.md                              # Project overview and phase descriptions
 ├── AGENTS.md                              # Notes for AI assistants
-├── TURN_MANIFEST.md                       # Specification for TURN integration (13,500 words)
 ├── Notes.md                               # Phase 1 bug discovery and fix documentation
 │
 └── .claude/
@@ -872,6 +871,5 @@ If TURN cannot be fixed quickly:
 
 - **README.md** — Project overview, setup instructions, phase descriptions, scoring rubric
 - **AGENTS.md** — Notes for AI assistants working on this codebase
-- **TURN_MANIFEST.md** — Detailed specification for TURN integration (13,500 words)
 - **Notes.md** — Phase 1 bug discovery documentation and verification checklist
 - **.claude/knowledge/*.md** — Specialized knowledge files (stack, conventions, schema, API patterns, design language, infra, decisions)
