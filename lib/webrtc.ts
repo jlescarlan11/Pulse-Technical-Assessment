@@ -1,4 +1,9 @@
 import { TokenBucket, createInboundChatBucket } from "@/lib/chatRate";
+import {
+  type FilterPresetId,
+  getFilterPreset,
+  DEFAULT_FILTER_ID,
+} from "@/lib/videoFilters";
 
 export type DescType = "offer" | "answer" | "ice";
 export type PeerControl =
@@ -49,6 +54,14 @@ interface PeerCallbacks {
 const ICE_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
+
+// Frame rate for the canvas filter capture stream. Bounded ON PURPOSE: a
+// filtered call drives a per-frame draw loop + captureStream, so we cap the
+// capture (and therefore the per-frame CPU and the encoder's input rate) to
+// keep a filtered call's cost predictable. 24fps reads as smooth video while
+// leaving headroom on modest hardware. Only ever paid when a non-"none"
+// preset is active — "none" never builds the canvas pipeline at all.
+const FILTER_CAPTURE_FPS = 24;
 
 // Fetches short-lived ICE (STUN+TURN) credentials from the coordination API.
 // The backend now requires the session id + capability token as query params
@@ -142,6 +155,41 @@ export class PeerSession {
   // (t:"msg") frames; ctrl/typing frames never touch it. Built lazily so
   // sessions that never receive chat pay nothing.
   private chatFloodClamp: TokenBucket | null = null;
+
+  // --- Camera filter (Tier 2 cosmetic color-grade) state ------------------
+  //
+  // The filter is COSMETIC ONLY. Privacy is owned by the .enabled gate
+  // (setOutgoingVideoEnabled), NEVER by the filter: the rAF draw loop is
+  // throttled/paused in background tabs, whereas .enabled is enforced by the
+  // media pipeline regardless of tab state. By the time a tab is hidden the
+  // gate has already cut the feed via .enabled, so a stalled draw loop can
+  // never leak a clear frame.
+  //
+  // None-bypass: when activeFilterId === "none" (the default and common case)
+  // NONE of the fields below are populated — no canvas, no <video>, no loop —
+  // and the raw clone is transmitted exactly as it was before this feature.
+  // The canvas pipeline only comes into existence when a non-"none" preset is
+  // selected, and is fully torn down again on stopVideo().
+  private activeFilterId: FilterPresetId = DEFAULT_FILTER_ID;
+  // The raw cloned camera track — what we transmit when no filter is active,
+  // and the source we fall back to. Kept distinct from sentVideoTrack because
+  // sentVideoTrack always points at whatever is CURRENTLY sent (raw clone OR
+  // the canvas-derived track), and the gate reads sentVideoTrack.
+  private rawClone: MediaStreamTrack | null = null;
+  // The canvas filter pipeline pieces — all null while on "none".
+  private filterCanvas: HTMLCanvasElement | null = null;
+  private filterSourceVideo: HTMLVideoElement | null = null;
+  private filterStream: MediaStream | null = null;
+  private filterTrack: MediaStreamTrack | null = null;
+  private filterRafId: number | null = null;
+  // The CSS filter string the draw loop currently paints with. Switching
+  // between two non-"none" presets only mutates THIS string — no track swap,
+  // no renegotiation.
+  private filterCss = "";
+  // The current gate state, mirrored here so a freshly swapped-in sent track
+  // can be born at the right .enabled BEFORE it goes live. Fail-closed
+  // default (false): a filtered call is exactly as gated as an unfiltered one.
+  private outgoingVideoEnabled = false;
 
   constructor(
     initiator: boolean,
@@ -358,10 +406,15 @@ export class PeerSession {
       const [videoTrack] = this.localStream.getVideoTracks();
       if (videoTrack) {
         // Send a clone so gating it never affects the original preview track.
-        this.sentVideoTrack = videoTrack.clone();
+        // We hold this raw clone in its own field (rawClone) because
+        // sentVideoTrack tracks whatever is CURRENTLY sent — that is the raw
+        // clone now, but becomes the canvas-derived track once a filter is on.
+        this.rawClone = videoTrack.clone();
+        this.sentVideoTrack = this.rawClone;
         // Born gated (fail-closed): the clone starts disabled so no clear frame
         // can ever flow before the presence engine confirms mutual presence —
-        // we don't rely on React effect ordering for the initial cut.
+        // we don't rely on React effect ordering for the initial cut. This is
+        // also the source of truth for outgoingVideoEnabled (already false).
         this.sentVideoTrack.enabled = false;
         this.pc.addTrack(this.sentVideoTrack, this.localStream);
       }
@@ -390,6 +443,11 @@ export class PeerSession {
   // the gate holds no matter which reference is read. No-op-safe before any
   // video track exists.
   setOutgoingVideoEnabled(enabled: boolean): void {
+    // Remember the gate state so a track we swap in LATER (when a filter turns
+    // on/off) can be born at this exact .enabled before it goes live — see
+    // swapSentTrack(). This keeps a filtered call exactly as fail-closed as an
+    // unfiltered one: no clear frame can escape during a track swap.
+    this.outgoingVideoEnabled = enabled;
     if (this.sentVideoTrack) {
       this.sentVideoTrack.enabled = enabled;
     }
@@ -408,16 +466,243 @@ export class PeerSession {
     }
   }
 
+  // Select the Tier 2 cosmetic color-grade applied to the TRANSMITTED video.
+  //
+  // Honest return value: this ALWAYS returns the preset id actually in effect,
+  // not the one requested. If we cannot build the canvas pipeline (captureStream
+  // missing, getContext unavailable, anything throws) we fall back to "none" and
+  // return "none" so the caller can sync the UI to the truth rather than show a
+  // filter the peer is not receiving.
+  //
+  // None-bypass (zero cost at rest): selecting "none" tears the canvas pipeline
+  // down (if any) and transmits the raw clone EXACTLY as the pre-filter code did
+  // — no canvas, no requestAnimationFrame, no per-frame draw. The default
+  // startup state is "none", so a call that never touches a filter pays nothing.
+  //
+  // Switching between two non-"none" presets does NOT swap tracks or
+  // renegotiate: it only changes the css string the existing draw loop paints
+  // with (the canvas-derived track stays the live sent track).
+  //
+  // IMPORTANT: the filter is COSMETIC. Privacy is owned by the .enabled gate
+  // (setOutgoingVideoEnabled), never by the filter. Any track we swap in is born
+  // at the current gate state via swapSentTrack(), so a filtered call is exactly
+  // as fail-closed as an unfiltered one.
+  setFilter(presetId: string): FilterPresetId {
+    const preset = getFilterPreset(presetId); // unknown ids => "none"
+
+    // No video yet: there is no track to swap, so just latch the requested grade
+    // into our state and return it. In practice this is unreachable — the picker
+    // only mounts while video === "active" (so startVideo() has already run and
+    // rawClone exists), and selectFilter() guards a null peer. It stays as a
+    // defensive coherent-state path: note that startVideo() does NOT replay this
+    // latch, so a grade is only ever actually transmitted via a setFilter() call
+    // made once video is live.
+    if (!this.rawClone) {
+      this.activeFilterId = preset.id;
+      this.filterCss = preset.css;
+      return this.activeFilterId;
+    }
+
+    // -> "none": drop any pipeline and go back to transmitting the raw clone.
+    if (preset.id === "none") {
+      if (this.activeFilterId !== "none") {
+        this.teardownFilterPipeline();
+        this.swapSentTrack(this.rawClone);
+      }
+      this.activeFilterId = "none";
+      this.filterCss = "";
+      return "none";
+    }
+
+    // -> non-"none" while ALREADY filtered: just repaint with the new css. No
+    // track swap, no renegotiation (hard requirement d).
+    if (this.activeFilterId !== "none" && this.filterTrack) {
+      this.activeFilterId = preset.id;
+      this.filterCss = preset.css;
+      return this.activeFilterId;
+    }
+
+    // -> non-"none" from "none": build the canvas pipeline and swap the
+    // canvas-derived track in. On ANY failure, fall back to the raw clone and
+    // report "none" (honest fallback, hard requirement c).
+    try {
+      const built = this.buildFilterPipeline();
+      if (!built) {
+        // Unsupported environment (jsdom / older browser): degrade to "none"
+        // rather than crash. The raw clone keeps flowing.
+        this.teardownFilterPipeline();
+        this.activeFilterId = "none";
+        this.filterCss = "";
+        return "none";
+      }
+      this.filterCss = preset.css;
+      this.swapSentTrack(built);
+      this.activeFilterId = preset.id;
+      return this.activeFilterId;
+    } catch {
+      // Building the pipeline threw — tear down whatever partial state exists and
+      // fall back to the honest "none" so we never strand a half-built loop.
+      this.teardownFilterPipeline();
+      this.swapSentTrack(this.rawClone);
+      this.activeFilterId = "none";
+      this.filterCss = "";
+      return "none";
+    }
+  }
+
+  // Swap the CURRENTLY transmitted video track for `next` WITHOUT renegotiation
+  // (replaceTrack only — never remove/add). Crucially `next.enabled` is set to
+  // the stored gate state FIRST, before/as it goes live, so no clear frame can
+  // escape during the swap: a swapped-in track is exactly as gated as the one it
+  // replaces. We also keep this.sentVideoTrack pointed at `next` so the existing
+  // setOutgoingVideoEnabled first branch stays correct.
+  private swapSentTrack(next: MediaStreamTrack): void {
+    // Born at the current gate state (fail-closed default false). Do this BEFORE
+    // replaceTrack so the track is already gated the instant it is live.
+    next.enabled = this.outgoingVideoEnabled;
+    for (const sender of this.pc.getSenders()) {
+      if (sender.track && sender.track.kind === "video") {
+        sender.replaceTrack(next);
+      }
+    }
+    this.sentVideoTrack = next;
+  }
+
+  // Build the canvas filter stage. Returns the canvas-derived video track, or
+  // null if the environment lacks the required browser APIs (jsdom / older
+  // browsers) — the caller treats null as the honest "none" fallback.
+  //
+  // The source is a hidden <video> fed the EXISTING localStream (the original
+  // camera) — we never open a second getUserMedia. Each animation frame we draw
+  // that video into a canvas with ctx.filter set to the active css, and a
+  // captureStream(fps) of that canvas is what we transmit.
+  //
+  // COSMETIC, not protective: the rAF loop is throttled/paused in background
+  // tabs, but by then the .enabled gate has already cut the feed — the gate, not
+  // this loop, is the privacy authority.
+  private buildFilterPipeline(): MediaStreamTrack | null {
+    if (
+      typeof document === "undefined" ||
+      typeof document.createElement !== "function" ||
+      !this.localStream
+    ) {
+      return null;
+    }
+
+    const canvas = document.createElement("canvas");
+    // captureStream may be entirely absent (jsdom, very old browsers).
+    if (typeof canvas.captureStream !== "function") return null;
+    const ctx = canvas.getContext("2d");
+    // ctx may be null, and ctx.filter is itself a newer API — both => fall back.
+    if (!ctx || !("filter" in ctx)) return null;
+
+    const sourceVideo = document.createElement("video");
+    sourceVideo.muted = true;
+    sourceVideo.playsInline = true;
+    sourceVideo.srcObject = this.localStream;
+    // play() can reject (autoplay policy); muted+inline should allow it, and a
+    // rejected promise is non-fatal — the draw loop simply paints whatever the
+    // element currently has. Swallow with context-free .catch (no error to act
+    // on; the loop self-heals once frames arrive).
+    void sourceVideo.play?.().catch(() => {});
+
+    const settings = this.localStream.getVideoTracks()[0]?.getSettings?.();
+    // Truthy fallback (|| not ??) ON PURPOSE: some drivers/virtual cameras
+    // report width/height of 0 transiently before the first frame is produced.
+    // `?? 640` would KEEP that 0 (0 is not nullish), yielding a 0x0 canvas whose
+    // captureStream emits an empty/black track — a broken filtered feed. `|| 640`
+    // treats 0 (and NaN) as "no usable dimension" and falls back to a sane size.
+    const width = settings?.width || 640;
+    const height = settings?.height || 480;
+    canvas.width = width;
+    canvas.height = height;
+
+    const stream = canvas.captureStream(FILTER_CAPTURE_FPS);
+    const [track] = stream.getVideoTracks();
+    if (!track) return null;
+
+    this.filterCanvas = canvas;
+    this.filterSourceVideo = sourceVideo;
+    this.filterStream = stream;
+    this.filterTrack = track;
+
+    const draw = () => {
+      // The loop self-cancels if teardown nulled the pieces out.
+      if (!this.filterCanvas || !this.filterSourceVideo) return;
+      try {
+        ctx.filter = this.filterCss || "none";
+        ctx.drawImage(this.filterSourceVideo, 0, 0, canvas.width, canvas.height);
+      } catch {
+        // A transient draw error (e.g. video not yet ready) must not kill the
+        // loop — skip this frame and try again next tick.
+      }
+      this.filterRafId = requestAnimationFrame(draw);
+    };
+    // Prefer rAF; fall back to a timer if rAF is unavailable so the canvas still
+    // updates. requestAnimationFrame returns a number id we cancel on teardown.
+    if (typeof requestAnimationFrame === "function") {
+      this.filterRafId = requestAnimationFrame(draw);
+    } else {
+      // No rAF (non-browser): a single draw seeds the captured frame; without a
+      // loop the grade is static, which is an acceptable degraded mode.
+      draw();
+    }
+
+    return track;
+  }
+
+  // Stop the draw loop and release the canvas pipeline. Safe to call when no
+  // pipeline exists (all fields already null) — that is the "none" common case.
+  private teardownFilterPipeline(): void {
+    if (this.filterRafId !== null) {
+      if (typeof cancelAnimationFrame === "function") {
+        cancelAnimationFrame(this.filterRafId);
+      }
+      this.filterRafId = null;
+    }
+    if (this.filterTrack) {
+      this.filterTrack.stop();
+      this.filterTrack = null;
+    }
+    if (this.filterStream) {
+      for (const t of this.filterStream.getTracks()) t.stop();
+      this.filterStream = null;
+    }
+    if (this.filterSourceVideo) {
+      // Release the camera handle held by the hidden source element.
+      this.filterSourceVideo.srcObject = null;
+      this.filterSourceVideo = null;
+    }
+    this.filterCanvas = null;
+  }
+
   stopVideo() {
+    // Tear down the canvas filter stage FIRST: stop the rAF/draw loop, stop
+    // the canvas-derived track + its stream, and release the hidden source
+    // <video> (srcObject = null) so no animation loop or camera handle is left
+    // orphaned after the call ends. No-op when on "none" (nothing was built).
+    this.teardownFilterPipeline();
+    this.activeFilterId = "none";
+    this.filterCss = "";
+
     if (this.localStream) {
       // Stop the ORIGINAL camera tracks (turns the camera light off).
       for (const track of this.localStream.getTracks()) track.stop();
       this.localStream = null;
     }
     // Stop the SENT clone too — it holds its own handle on the camera source.
-    if (this.sentVideoTrack) {
+    // On "none" sentVideoTrack IS rawClone (same object); on a filtered call
+    // sentVideoTrack is the canvas track (already stopped in teardown above).
+    // Stop rawClone explicitly so the camera-source clone is always released,
+    // and only stop sentVideoTrack separately when it is a DIFFERENT object —
+    // never stop the same track twice.
+    if (this.sentVideoTrack && this.sentVideoTrack !== this.rawClone) {
       this.sentVideoTrack.stop();
-      this.sentVideoTrack = null;
+    }
+    this.sentVideoTrack = null;
+    if (this.rawClone) {
+      this.rawClone.stop();
+      this.rawClone = null;
     }
     for (const sender of this.pc.getSenders()) {
       if (sender.track) {

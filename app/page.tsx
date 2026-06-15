@@ -11,6 +11,7 @@ import { PeerSession, buildICEConfig, type DescType, type PeerControl } from "@/
 import { POLL_INTERVAL_MS } from "@/lib/presence";
 import { type PeerDot, type SignalMsg, type SignalType } from "@/lib/types";
 import { callSign } from "@/lib/callsign";
+import { DEFAULT_FILTER_ID, type FilterPresetId } from "@/lib/videoFilters";
 import { filterBlockedPeers, isBlockedRequest } from "@/lib/blocklist";
 type Conn =
   | { kind: "idle" }
@@ -132,6 +133,16 @@ export default function Home() {
   // Peer's mute/camera state, set from inbound control messages.
   const [peerMuted, setPeerMuted] = useState(false);
   const [peerCameraOn, setPeerCameraOn] = useState(true);
+
+  // Camera filter (cosmetic colour-grade). Holds the EFFECTIVE preset id — the
+  // one PeerSession.setFilter() reported actually in effect — never the user's
+  // raw request. So if the browser can't build the canvas pipeline and the
+  // engine falls back to "none", this state reflects that honest fallback and
+  // the picker/self-view never claim a grade the peer isn't receiving. No
+  // persistence (no localStorage): each call starts at DEFAULT_FILTER_ID and
+  // teardown() resets it, consistent with the app's no-persistence model.
+  const [selectedFilter, setSelectedFilter] =
+    useState<FilterPresetId>(DEFAULT_FILTER_ID);
 
   // ── Reciprocal Video presence state ──
   // localAway: this tab has stepped away (hidden/pagehide). peerAway: the
@@ -364,6 +375,7 @@ export default function Home() {
     setIsCameraOn(true);
     setPeerMuted(false);
     setPeerCameraOn(true);
+    setSelectedFilter(DEFAULT_FILTER_ID);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
   }
@@ -444,6 +456,21 @@ export default function Home() {
     // instantly regardless of presence. cameraOnRef is already updated above.
     applyVideoGate();
     ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
+  }
+
+  // Pick a camera filter. Honest-state binding (hard requirement): we set React
+  // state from setFilter()'s RETURN VALUE — the EFFECTIVE id the engine applied,
+  // not the requested one. If the canvas pipeline can't be built the engine
+  // returns "none" and the picker + self-view fall back honestly, never showing
+  // a grade the peer isn't actually receiving. Guards a null peer exactly like
+  // toggleMute / toggleCamera. The SAME css string then drives the transmit
+  // canvas AND the self-view (via getFilterPreset in VideoPanel), so they can't
+  // drift. Cosmetic only: this never touches the presence/.enabled gate.
+  function selectFilter(id: FilterPresetId) {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const effective = ps.setFilter(id);
+    setSelectedFilter(effective);
   }
 
   function handleControl(ctrl: PeerControl) {
@@ -1184,6 +1211,8 @@ export default function Home() {
           onToggleCamera={toggleCamera}
           peerMuted={peerMuted}
           peerCameraOn={peerCameraOn}
+          selectedFilter={selectedFilter}
+          onSelectFilter={selectFilter}
         />
       )}
 
