@@ -28,7 +28,7 @@
  * API suites are unaffected.
  */
 import "@testing-library/jest-dom";
-import { act, render, screen, within } from "@testing-library/react";
+import { act, fireEvent, render, screen, within } from "@testing-library/react";
 import VideoPanel from "./VideoPanel";
 
 // A stand-in MediaStream; VideoPanel only assigns it to <video>.srcObject and
@@ -44,6 +44,12 @@ function panel(over: Partial<React.ComponentProps<typeof VideoPanel>> = {}) {
       onEnd={() => {}}
       peerAway={false}
       localAway={false}
+      isMuted={false}
+      onToggleMute={() => {}}
+      isCameraOn={true}
+      onToggleCamera={() => {}}
+      peerMuted={false}
+      peerCameraOn={true}
       {...over}
     />
   );
@@ -238,8 +244,8 @@ describe("VideoPanel pre-call waiting state", () => {
       expect(
         screen.getByText("You can leave anytime with End video below."),
       ).toBeInTheDocument();
-      // The End control is force-shown in the pre-stream state.
-      expect(screen.getByText("End video")).toBeInTheDocument();
+      // The End control is force-shown in the pre-stream state (icon-only button).
+      expect(screen.getByLabelText("End video call")).toBeInTheDocument();
     } finally {
       jest.useRealTimers();
     }
@@ -284,15 +290,7 @@ describe("VideoPanel aria-live presence announcements", () => {
     // condition the BUG-5 fix gates the announcement on. The announcement now
     // describes sharing honestly: the video is no longer shared while they're away.
     const { rerender } = renderPanel({ peerAway: false, localAway: false });
-    rerender(
-      <VideoPanel
-        localStream={fakeStream}
-        remoteStream={fakeStream}
-        onEnd={() => {}}
-        peerAway={true}
-        localAway={false}
-      />,
-    );
+    rerender(panel({ peerAway: true, localAway: false }));
     expect(
       within(liveRegion()).getByText(/Stranger stepped away\. Your video is no longer shared/),
     ).toBeInTheDocument();
@@ -310,15 +308,7 @@ describe("VideoPanel aria-live presence announcements", () => {
   it("announces the stranger is back (sharing-honest) when a connected peer returns", () => {
     // Start away (after a connection existed), then return.
     const { rerender } = renderPanel({ peerAway: true, localAway: false });
-    rerender(
-      <VideoPanel
-        localStream={fakeStream}
-        remoteStream={fakeStream}
-        onEnd={() => {}}
-        peerAway={false}
-        localAway={false}
-      />,
-    );
+    rerender(panel({ peerAway: false, localAway: false }));
     expect(
       within(liveRegion()).getByText(/Stranger is back\. Your video is shared again/),
     ).toBeInTheDocument();
@@ -326,17 +316,63 @@ describe("VideoPanel aria-live presence announcements", () => {
 
   it("announces 'You’re back' (sharing-honest) when the local user returns", () => {
     const { rerender } = renderPanel({ peerAway: false, localAway: true });
-    rerender(
-      <VideoPanel
-        localStream={fakeStream}
-        remoteStream={fakeStream}
-        onEnd={() => {}}
-        peerAway={false}
-        localAway={false}
-      />,
-    );
+    rerender(panel({ peerAway: false, localAway: false }));
     expect(
       within(liveRegion()).getByText(/You’re back\. Your video is shared again/),
     ).toBeInTheDocument();
+  });
+});
+
+describe("Phase 5 — mute & camera controls", () => {
+  it("renders mute, camera, and end buttons with accessible labels", () => {
+    renderPanel();
+    expect(screen.getByLabelText("Mute")).toBeInTheDocument();
+    expect(screen.getByLabelText("Turn off camera")).toBeInTheDocument();
+    expect(screen.getByLabelText("End video call")).toBeInTheDocument();
+  });
+
+  it("flips the mute button label and aria-pressed when muted", () => {
+    renderPanel({ isMuted: true });
+    const btn = screen.getByLabelText("Unmute");
+    expect(btn).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("flips the camera button label and aria-pressed when camera off", () => {
+    renderPanel({ isCameraOn: false });
+    const btn = screen.getByLabelText("Turn on camera");
+    expect(btn).toHaveAttribute("aria-pressed", "false");
+  });
+
+  it("fires onToggleMute / onToggleCamera on click", () => {
+    const onToggleMute = jest.fn();
+    const onToggleCamera = jest.fn();
+    renderPanel({ onToggleMute, onToggleCamera });
+    fireEvent.click(screen.getByLabelText("Mute"));
+    fireEvent.click(screen.getByLabelText("Turn off camera"));
+    expect(onToggleMute).toHaveBeenCalledTimes(1);
+    expect(onToggleCamera).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows the peer 'Muted' badge only when the peer is muted", () => {
+    const { rerender } = renderPanel({ peerMuted: false });
+    expect(screen.queryByText("Muted")).not.toBeInTheDocument();
+    rerender(panel({ peerMuted: true }));
+    expect(screen.getByText("Muted")).toBeInTheDocument();
+  });
+
+  it("shows the peer 'Camera off' badge only when the peer's camera is off", () => {
+    const { rerender } = renderPanel({ peerCameraOn: true });
+    expect(screen.queryByText("Camera off")).not.toBeInTheDocument();
+    rerender(panel({ peerCameraOn: false }));
+    expect(screen.getByText("Camera off")).toBeInTheDocument();
+  });
+
+  it("labels the local PiP 'only you see this' when YOU turn your camera off (self-view stays live)", () => {
+    renderPanel({ isCameraOn: false, peerAway: false, localAway: false });
+    // Honest: the self-view is live but the peer receives black, so the badge
+    // explains the feed is not shared — it never claims to stop recording.
+    expect(screen.getByText("Off · only you see this")).toBeInTheDocument();
+    // ...and the normal "You" label is replaced by the not-shared pill.
+    expect(screen.queryByText("You")).not.toBeInTheDocument();
   });
 });

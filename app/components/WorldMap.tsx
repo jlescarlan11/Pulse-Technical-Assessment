@@ -9,25 +9,25 @@ import { callSign } from "@/lib/callsign";
 
 // Empty string (never a placeholder token) when unset, so no Mapbox secret is
 // baked into the bundle and the graceful "set your token" fallback below renders
-// instead of the map failing silently. (Phase 3 M1 + Phase 2 peerColor refactor.)
+// instead of the map failing silently.
 const TOKEN = process.env.NEXT_PUBLIC_MAPBOX_TOKEN ?? "";
 
 // Once the coach hint has been seen this session we don't nag on every render
 // (route changes, peer churn, reconnects). Cleared when the tab closes.
 const COACH_SEEN_KEY = "pulse.coachSeen";
 
-// Phase 4 (map controls) — the zoom we settle on when centering on the user.
+// (Map controls) — the zoom we settle on when centering on the user.
 // Shared by the initial center-on-me (map init) and the Recenter control so the
 // two stay visually identical. ~4 = "your neighbourhood of the world".
 const ME_ZOOM = 4;
 
-// Phase 4 (map controls) — when framing peers, never tunnel past this zoom. The
+// (Map controls) — when framing peers, never tunnel past this zoom. The
 // single-peer / coincident-points case has no spatial spread, so fitBounds would
 // otherwise slam to max zoom and look broken (stakeholder tripwire). Capping at
 // ME_ZOOM lands us at the same comfortable altitude as Recenter.
 const FRAME_MAX_ZOOM = ME_ZOOM;
 
-// Phase 4 (map controls) — read the live OS/browser reduced-motion preference at
+// (Map controls) — read the live OS/browser reduced-motion preference at
 // the moment of a camera move. Mapbox JS animates the camera in JS, NOT via CSS
 // transitions, so the globals.css reduced-motion block does NOT govern it — we
 // must branch on this and pass animate:false / use jumpTo ourselves. Read per
@@ -63,18 +63,18 @@ export default function WorldMap({
   // reset the bearing back to north (ignoring the initial null on mount).
   const originActiveRef = useRef(false);
 
-  // Phase 4 (map controls) — zoom-bound flags drive the at-limit state of the
+  // (Map controls) — zoom-bound flags drive the at-limit state of the
   // +/- buttons. WHY aria-disabled (not the native `disabled` attr): a control
   // that disables itself WHILE it holds keyboard focus makes the browser
   // synchronously blur it to <body>, ejecting the keyboard user from the cluster
-  // (BUG-5). aria-disabled keeps the button focusable and in the tab order — AT
+  // aria-disabled keeps the button focusable and in the tab order — AT
   // still announces it as unavailable, the click handler no-ops at the bound, and
   // focus is never dropped. Synced from the map's "zoom" event (and on ready) —
   // never read from the map during render.
   const [atMinZoom, setAtMinZoom] = useState(false);
   const [atMaxZoom, setAtMaxZoom] = useState(false);
 
-  // Phase 4 (map controls) — `atHome` dims Recenter when tapping it would change
+  // (Map controls) — `atHome` dims Recenter when tapping it would change
   // nothing: the pin is already centred AND the map is at the home zoom. Synced
   // in screen pixels off the live "move" event (see the effect below).
   const [atHome, setAtHome] = useState(false);
@@ -90,7 +90,7 @@ export default function WorldMap({
   const chipRef = useRef<HTMLButtonElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
 
-  // M2(a) — first-entry coach hint. Default to hidden so SSR + first paint stay
+  // First-entry coach hint. Default to hidden so SSR + first paint stay
   // stable, then resolve against sessionStorage on mount.
   const [coachVisible, setCoachVisible] = useState(false);
 
@@ -131,7 +131,7 @@ export default function WorldMap({
     canConnectRef.current = canConnect;
   });
 
-  // Phase 4 (map controls) — camera handlers. The buttons are re-rendered every
+  // (Map controls) — camera handlers. The buttons are re-rendered every
   // render, so these can close over live `me` / `peers` directly (no stale-ref
   // dance needed, unlike the bound-once marker click). Each delegates the zoom
   // *math* to Mapbox (which clamps to min/max internally and never throws at a
@@ -147,7 +147,7 @@ export default function WorldMap({
     mapRef.current?.zoomOut();
   }, [atMinZoom]);
 
-  // Story 2 — Recenter on me. Fly back to the "You are here" pin at ME_ZOOM
+  // Recenter on me. Fly back to the "You are here" pin at ME_ZOOM
   // (the same altitude the map opens at). Under reduced motion we jumpTo instead
   // of flyTo so a reduced-motion user doesn't get a swooping JS camera animation
   // the CSS reduced-motion block can't reach. Guarded on a live `me`.
@@ -164,11 +164,11 @@ export default function WorldMap({
     }
   }, [me, atHome]);
 
-  // Story 3 — Frame all signals. Fit the camera to every PEER dot at once; the
+  // Frame all signals. Fit the camera to every PEER dot at once; the
   // user's own `me` pin is deliberately excluded so the frame answers "where are
   // the souls?", not "what's on my screen?" (Recenter already serves "take me to
   // me"). Two correctnesses ride along:
-  //   • BUG-4 (antimeridian): unwrap each longitude to the SHORTEST arc relative
+  //   • Antimeridian: unwrap each longitude to the SHORTEST arc relative
   //     to the first peer, so date-line-straddling peers (e.g. +179 and −179)
   //     frame tightly instead of zooming out around the whole globe the long
   //     way. Mapbox renders longitudes outside [-180,180] the short way.
@@ -186,7 +186,7 @@ export default function WorldMap({
       const ref = peers[0].lng;
       const bounds = new mapboxgl.LngLatBounds();
       for (const peer of peers) {
-        // Unwrap to within 180° of the reference peer (BUG-4): if a peer is more
+        // Unwrap to within 180° of the reference peer: if a peer is more
         // than half the globe away in raw lng, shift it by ±360 so the pair sits
         // on the short arc. Latitude passes through untouched.
         let lng = peer.lng;
@@ -197,7 +197,7 @@ export default function WorldMap({
       map.fitBounds(bounds, {
         // Asymmetric padding so framed dots clear the top/bottom scrims and the
         // bottom-left presence chip instead of hiding under the HUD chrome
-        // (QA BUG-6): more room at the bottom (presence chip + scrim) and left.
+        // More room at the bottom (presence chip + scrim) and left.
         padding: { top: 96, bottom: 112, left: 84, right: 64 },
         maxZoom: FRAME_MAX_ZOOM,
         animate: !prefersReducedMotion(),
@@ -370,7 +370,7 @@ export default function WorldMap({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Phase 4 (map controls) — keep the +/- disabled flags in sync with where the
+  // (Map controls) — keep the +/- disabled flags in sync with where the
   // camera actually is. We compare against a small epsilon (not strict equality)
   // because Mapbox lands fractionally short of the exact min/max after a wheel /
   // pinch, and we still want the buttons to lock at the practical limit. Bound
@@ -395,7 +395,7 @@ export default function WorldMap({
     };
   }, [ready]);
 
-  // Phase 4 (map controls) — keep `atHome` in sync so Recenter dims exactly when
+  // (Map controls) — keep `atHome` in sync so Recenter dims exactly when
   // tapping it would change nothing: the user's pin sits at the viewport centre
   // AND the zoom is already ME_ZOOM. We measure the centre offset in PIXELS
   // (project the pin, compare to the projected map centre) so the check is
@@ -501,7 +501,7 @@ export default function WorldMap({
         dot.disabled = !reachable;
         dot.title = peer.busy ? "In another conversation" : "Tap to connect";
         // Pair the stable call-sign with the action so the dot's accessible
-        // name matches the list row referent (Phase 4 Story 1).
+        // name matches the list row referent.
         const sign = callSign(peer.id);
         dot.setAttribute(
           "aria-label",
@@ -527,9 +527,9 @@ export default function WorldMap({
 
   const hasPeers = peers.length > 0;
   const showLoading = Boolean(TOKEN) && !ready;
-  // Story 2 — Recenter is live the instant a fix lands; disabled (not hidden)
+  // Recenter is live the instant a fix lands; disabled (not hidden)
   // until then, and also while we're already home (centred at ME_ZOOM), where a
-  // tap would do nothing. Story 3 — Frame needs at least one peer to frame.
+  // tap would do nothing. Frame needs at least one peer to frame.
   const canRecenter = me !== null && !atHome;
   const canFrame = hasPeers;
 
@@ -547,7 +547,7 @@ export default function WorldMap({
         className="pointer-events-none absolute inset-x-0 bottom-0 h-28 bg-gradient-to-t from-ink-950/70 to-transparent"
       />
 
-      {/* M1 — designed loading state over the ink field while Mapbox imports /
+      {/* Designed loading state over the ink field while Mapbox imports /
           initialises. A pulsing signal-mint beacon + mono label, reusing the
           radar vocabulary instead of a blank ink rectangle. The beacon ring
           (animate-ping) is dropped under reduced motion by globals.css, and the
@@ -589,7 +589,7 @@ export default function WorldMap({
         </span>
       </div>
 
-      {/* Phase 4 (map controls) — top-right cluster. Deliberately clears the
+      {/* (Map controls) — top-right cluster. Deliberately clears the
           brand mark (top-left), the coach hint (top-center, left-1/2), the
           presence chip (bottom-left) and Mapbox attribution (bottom-right). A
           vertical stack of glass buttons in the HUD vocabulary — NOT Mapbox's
@@ -604,8 +604,8 @@ export default function WorldMap({
           aria-label="Map controls"
           className="glass-faint animate-fade-up absolute right-4 top-4 flex flex-col overflow-hidden rounded-xl"
         >
-          {/* Story 1 — Zoom in. aria-disabled (not native disabled) at the max
-              bound so focus is never yanked off it (BUG-5); the handler no-ops. */}
+          {/* Zoom in. aria-disabled (not native disabled) at the max
+              bound so focus is never yanked off it; the handler no-ops. */}
           <button
             type="button"
             onClick={zoomIn}
@@ -630,7 +630,7 @@ export default function WorldMap({
           {/* Hairline between the paired zoom controls. */}
           <span aria-hidden className="hairline mx-2 border-t" />
 
-          {/* Story 1 — Zoom out. aria-disabled at the min-zoom bound. */}
+          {/* Zoom out. aria-disabled at the min-zoom bound. */}
           <button
             type="button"
             onClick={zoomOut}
@@ -657,7 +657,7 @@ export default function WorldMap({
               (heavier than the intra-pair hairline above). */}
           <span aria-hidden className="hairline mx-2 my-1 border-t" />
 
-          {/* Story 2 — Recenter on me. Disabled (not hidden) until a fix lands;
+          {/* Recenter on me. Disabled (not hidden) until a fix lands;
               the `me`-live closure enables it without a remount. */}
           <button
             type="button"
@@ -684,7 +684,7 @@ export default function WorldMap({
           {/* Hairline between the two nav actions. */}
           <span aria-hidden className="hairline mx-2 border-t" />
 
-          {/* Story 3 — Frame all signals. Disabled when there are no peers to
+          {/* Frame all signals. Disabled when there are no peers to
               frame. Fits the camera over peers only (own pin excluded). */}
           <button
             type="button"
@@ -710,7 +710,7 @@ export default function WorldMap({
         </div>
       )}
 
-      {/* M2(a) — first-entry coach hint, mono label voice. Auto-fades after a
+      {/* First-entry coach hint, mono label voice. Auto-fades after a
           few seconds, on first connect, or when dismissed. MINOR 3 — only ever
           shown when there ARE peers, so it never contradicts the zero-state. */}
       {coachVisible && ready && hasPeers && (
@@ -746,7 +746,7 @@ export default function WorldMap({
       {/* Live presence count — bottom left. The chip is itself the C2 accessible
           entry point: it toggles a focusable disclosure of nearby signals. */}
       <div className="absolute bottom-4 left-4 flex flex-col items-start gap-2">
-        {/* M2(b) — calm zero-state reassurance when no one is around yet. */}
+        {/* Calm zero-state reassurance when no one is around yet. */}
         {ready && !hasPeers && (
           <p className="glass-faint animate-fade-up max-w-[15rem] rounded-2xl px-4 py-2.5 text-xs leading-relaxed text-haze-300">
             No signals nearby yet — stay on, someone will appear.
@@ -770,7 +770,7 @@ export default function WorldMap({
             <ul className="flex max-h-64 flex-col gap-1 overflow-y-auto">
               {peers.map((peer) => {
                 const reachable = !peer.busy && canConnect;
-                // Phase 4 Story 1 — stable per-peer call-sign (replaces the
+                // Stable per-peer call-sign (replaces the
                 // 4-char code) and the SR referent for the colour swatch.
                 const sign = callSign(peer.id);
                 const status = peer.busy

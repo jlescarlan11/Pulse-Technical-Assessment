@@ -1,4 +1,4 @@
-// Phase 4 "Block & Next" — the two pure block DECISIONS, extracted so they can
+// The two pure block DECISIONS, extracted so they can
 // be unit-tested without mounting the whole page (WebRTC, geolocation, the poll
 // loop). page.tsx still owns the ephemeral in-memory Set<string> (a ref that
 // dies with the tab); these helpers are stateless predicates over whatever Set

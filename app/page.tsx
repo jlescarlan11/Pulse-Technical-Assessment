@@ -51,7 +51,7 @@ export default function Home() {
   // re-arms the auto-dismiss timer for the latest notice and lets the action
   // path use a longer window (see showNotice).
   //
-  // A11y (M1): the toast lives in a PERSISTENT live region (always-mounted
+  // A11y: the toast lives in a PERSISTENT live region (always-mounted
   // container; only its inner content swaps), so an announcement fires on each
   // empty→full content change rather than racing the region's own mount. The
   // optional `assertive` flag promotes the announcement to assertive/role=alert
@@ -67,7 +67,7 @@ export default function Home() {
   const [notice, setNotice] = useState<Notice | null>(null);
   const noticeNonce = useRef(0);
   const noticeTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // M1 focus management for the Block→Undo safety net. After blockPeer(),
+  // Focus management for the Block→Undo safety net. After blockPeer(),
   // teardown() unmounts ChatPanel and the focused Block button is destroyed,
   // so focus would fall to <body> and the keyboard/SR user would have to
   // blind-tab to find Undo within the 6s window. Instead we move focus to the
@@ -84,7 +84,7 @@ export default function Home() {
   const [terminalNotice, setTerminalNotice] = useState<string | null>(null);
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [remoteStream, setRemoteStream] = useState<MediaStream | null>(null);
-  // Phase 4 typing indicator. True while the peer is composing a message.
+  // Typing indicator. True while the peer is composing a message.
   // Ephemeral peer-driven UI flag: set straight from the data-channel callback
   // (onTyping), cleared on a real inbound message and on teardown. No ref mirror
   // needed — it is only read in render, never inside an interval or callback.
@@ -113,6 +113,26 @@ export default function Home() {
     _setVideo(v);
   };
 
+  // Mute/camera controls. Track user's manual audio/video toggles.
+  // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
+  // the user WANTS sent (false = they clicked "turn off camera").
+  //
+  // Camera is mirrored into a ref because the presence gate (applyVideoGate) —
+  // which runs on every 2s heartbeat — must read the latest manual intent to
+  // decide whether to (re)enable the outgoing track. Without this, every
+  // heartbeat re-enabled video and overrode a manual camera-off. The outgoing
+  // video is now gated on BOTH mutual presence AND this manual intent.
+  const [isMuted, setIsMuted] = useState(false);
+  const [isCameraOn, _setIsCameraOn] = useState(true);
+  const cameraOnRef = useRef(true);
+  const setIsCameraOn = (v: boolean) => {
+    cameraOnRef.current = v;
+    _setIsCameraOn(v);
+  };
+  // Peer's mute/camera state, set from inbound control messages.
+  const [peerMuted, setPeerMuted] = useState(false);
+  const [peerCameraOn, setPeerCameraOn] = useState(true);
+
   // ── Reciprocal Video presence state ──
   // localAway: this tab has stepped away (hidden/pagehide). peerAway: the
   // stranger has — fail-closed (assume away until the first heartbeat arrives).
@@ -137,7 +157,7 @@ export default function Home() {
 
   const peerRef = useRef<PeerSession | null>(null);
   const msgId = useRef(0);
-  // Phase 4 "Block & Next" — an EPHEMERAL, in-memory blocklist of peer ids the
+  // An EPHEMERAL, in-memory blocklist of peer ids the
   // user has refused. Held in a ref ON PURPOSE: it is read synchronously inside
   // the poll tick (to filter discovery) and inside processSignal (to auto-decline
   // inbound requests), and it must NOT survive the tab. No state, no localStorage,
@@ -218,7 +238,7 @@ export default function Home() {
     setNotice(null);
   }
 
-  // M1 — when an ACTION notice (the Block→Undo toast) mounts, move focus onto
+  // When an ACTION notice (the Block→Undo toast) mounts, move focus onto
   // its Undo button so the 6s window is reachable without a blind tab from
   // <body> (ChatPanel having just unmounted). The persistent live region still
   // announces the text; this only places focus. Non-action notices don't grab
@@ -297,13 +317,20 @@ export default function Home() {
       clearTimeout(resumeTimer.current);
       resumeTimer.current = null;
     }
+    // The outgoing video may only flow when BOTH the presence shield is
+    // satisfied (mutually present) AND the user hasn't manually turned their
+    // camera off. The manual intent is read from a ref so the 2s heartbeat,
+    // which calls this, never re-enables a track the user explicitly cut.
     const mutuallyPresent = !localAwayRef.current && !peerAwayRef.current;
-    if (!mutuallyPresent) {
+    const shouldSend = mutuallyPresent && cameraOnRef.current;
+    if (!shouldSend) {
+      // Cutting is instant — manual-off or an absent peer both close the window
+      // immediately with no resume delay.
       ps.setOutgoingVideoEnabled(false);
     } else {
       resumeTimer.current = setTimeout(() => {
         resumeTimer.current = null;
-        if (!localAwayRef.current && !peerAwayRef.current) {
+        if (!localAwayRef.current && !peerAwayRef.current && cameraOnRef.current) {
           peerRef.current?.setOutgoingVideoEnabled(true);
         }
       }, RESUME_DELAY_MS);
@@ -333,6 +360,10 @@ export default function Home() {
     setPeerTyping(false);
     setMessages([]);
     setOriginPeer(null);
+    setIsMuted(false);
+    setIsCameraOn(true);
+    setPeerMuted(false);
+    setPeerCameraOn(true);
     setConn({ kind: "idle" });
     if (message) showNotice(message);
   }
@@ -393,6 +424,28 @@ export default function Home() {
     }
   }
 
+  function toggleMute() {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const newMuted = !isMuted;
+    setIsMuted(newMuted);
+    ps.setOutgoingAudioEnabled(!newMuted);
+    ps.sendControl(newMuted ? "audio-mute" : "audio-unmute");
+  }
+
+  function toggleCamera() {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const newCameraOn = !isCameraOn;
+    setIsCameraOn(newCameraOn);
+    // Route through the gate rather than toggling the track directly: it folds
+    // the new manual intent together with mutual presence, so turning the camera
+    // "on" while the peer is away stays shielded, and turning it "off" cuts
+    // instantly regardless of presence. cameraOnRef is already updated above.
+    applyVideoGate();
+    ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
+  }
+
   function handleControl(ctrl: PeerControl) {
     const ps = peerRef.current;
     switch (ctrl) {
@@ -440,6 +493,18 @@ export default function Home() {
           if (!peerAwayRef.current) setPeerAway(true);
           applyVideoGateRef.current();
         }
+        break;
+      case "audio-mute":
+        setPeerMuted(true);
+        break;
+      case "audio-unmute":
+        setPeerMuted(false);
+        break;
+      case "video-manual-off":
+        setPeerCameraOn(false);
+        break;
+      case "video-manual-on":
+        setPeerCameraOn(true);
         break;
     }
   }
@@ -492,7 +557,7 @@ export default function Home() {
     teardown();
   }
 
-  // Phase 4 — refuse the current peer for the rest of this session, then return
+  // Refuse the current peer for the rest of this session, then return
   // to the map. Mirrors endConnection: record + teardown happen UNCONDITIONALLY,
   // independent of whether the network emit lands (a refusal must never hinge on
   // the wire). We:
@@ -504,7 +569,7 @@ export default function Home() {
   //   4. teardown() to unmount ChatPanel and land back on the WorldMap,
   //   5. surface an honest, session-scoped toast WITH an Undo affordance. It's
   //      assertive (result of a destructive action) and focus moves to Undo so
-  //      the 6s safety net is reachable for keyboard/SR users (M1).
+  //      the 6s safety net is reachable for keyboard/SR users.
   function blockPeer() {
     const c = connRef.current;
     if (c.kind !== "connecting" && c.kind !== "connected") return;
@@ -567,7 +632,7 @@ export default function Home() {
   function processSignal(sig: SignalMsg) {
     switch (sig.type) {
       case "request": {
-        // Phase 4 — a request from a blocked peer is silently auto-declined and
+        // A request from a blocked peer is silently auto-declined and
         // NO prompt is shown. We emit the SAME "decline" a busy/ignored request
         // produces, so it is indistinguishable from a normal decline — no
         // "you are blocked" signal is ever leaked to the peer. Checked first so
@@ -725,7 +790,7 @@ export default function Home() {
         const data = await poll(sessionId, token);
         if (!active) return;
         authFailures = 0; // a clean poll clears the backoff
-        // Phase 4 — exclude blocked peers from discovery entirely (map dots, the
+        // Exclude blocked peers from discovery entirely (map dots, the
         // accessible "Nearby signals" list, and the count all derive from this).
         setPeers(filterBlockedPeers(data.peers, blockedRef.current));
         for (const s of data.signals) processSignalRef.current(s);
@@ -872,7 +937,7 @@ export default function Home() {
 
   return (
     // tabIndex=-1 + ref so focus can be returned here (not <body>) after the
-    // Block→Undo toast is dismissed/timed-out — see returnFocusToMain (M1).
+    // Block→Undo toast is dismissed/timed-out — see returnFocusToMain.
     <main ref={mainRef} tabIndex={-1} className="fixed inset-0 overflow-hidden outline-none">
       <WorldMap
         peers={
@@ -886,7 +951,7 @@ export default function Home() {
         originPeer={originPeer}
       />
 
-      {/* Z-TIER (M6): status messaging always sits ABOVE modals/panels.
+      {/* Z-TIER: status messaging always sits ABOVE modals/panels.
           ConnectionPrompt + VideoPanel occupy z-40; every transient toast and
           the terminal notice ride z-50 so they can never be occluded. Distinct
           top slots keep two simultaneously-possible toasts from stacking on the
@@ -894,7 +959,7 @@ export default function Home() {
           own top-6; the "requesting" pill drops to top-20 so a leftover
           confirmation toast and an active request never collide. */}
 
-      {/* Terminal / unrecoverable notice (M8). Persistent — no auto-dismiss —
+      {/* Terminal / unrecoverable notice. Persistent — no auto-dismiss —
           with a danger-tinted glass, a warning glyph, and a real focusable
           Reload control. role="alert" so it's announced assertively. Rendered
           first within the z-50 tier and on its own top-6 slot. */}
@@ -928,7 +993,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Transient confirmation toast — PERSISTENT live region (M1).
+      {/* Transient confirmation toast — PERSISTENT live region.
           The role=status container is ALWAYS mounted (suppressed only while a
           terminalNotice owns the slot); only its inner content swaps. A live
           region that is injected together with its text often fails to announce,
@@ -1113,6 +1178,12 @@ export default function Home() {
           onEnd={endVideo}
           peerAway={peerAway}
           localAway={localAway}
+          isMuted={isMuted}
+          onToggleMute={toggleMute}
+          isCameraOn={isCameraOn}
+          onToggleCamera={toggleCamera}
+          peerMuted={peerMuted}
+          peerCameraOn={peerCameraOn}
         />
       )}
 

@@ -1,5 +1,5 @@
 /**
- * Phase 4 — type-aware P2P chat flood clamp (render protection, NOT security).
+ * Type-aware P2P chat flood clamp (render protection, NOT security).
  *
  * This is the ONE shared source of truth for the chat message rate limit. Both
  * sides of the feature import from here so they can never drift:
