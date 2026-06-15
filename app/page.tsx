@@ -16,8 +16,11 @@ import { useNotice } from "./hooks/useNotice";
 import { useChat } from "./hooks/useChat";
 import { useBlocklist } from "./hooks/useBlocklist";
 import { connReducer, initialConn, type Conn } from "./state/connReducer";
-
-type VideoState = "none" | "requesting" | "incoming" | "active";
+import {
+  videoReducer,
+  initialVideo,
+  type VideoState,
+} from "./state/videoReducer";
 
 const REQUEST_TIMEOUT_MS = 30_000;
 
@@ -74,7 +77,13 @@ export default function Home() {
     [setConn, connRef],
   );
 
-  const [video, videoRef, setVideo] = useRefState<VideoState>("none");
+  const [video, videoRef, setVideo] = useRefState<VideoState>(initialVideo);
+  // Video transitions route through the pure videoReducer (mirrors dispatchConn).
+  const dispatchVideo = useCallback(
+    (action: Parameters<typeof videoReducer>[1]) =>
+      setVideo(videoReducer(videoRef.current, action)),
+    [setVideo, videoRef],
+  );
 
   // Mute/camera controls. Track user's manual audio/video toggles.
   // isMuted: audio track disabled (user clicked mute). isCameraOn: video track
@@ -215,7 +224,7 @@ export default function Home() {
     peerRef.current = null;
     setLocalStream(null);
     setRemoteStream(null);
-    setVideo("none");
+    dispatchVideo({ type: "END" });
     resetPresence();
     chat.reset();
     setOriginPeer(null);
@@ -287,17 +296,17 @@ export default function Home() {
     const ps = peerRef.current;
     switch (ctrl) {
       case "video-request":
-        if (videoRef.current === "none") setVideo("incoming");
+        if (videoRef.current === "none") dispatchVideo({ type: "REQUEST_INCOMING" });
         break;
       case "video-accept":
         if (videoRef.current === "requesting" && ps) {
           ps.startVideo()
             .then((stream) => {
               setLocalStream(stream);
-              setVideo("active");
+              dispatchVideo({ type: "ACTIVATE" });
             })
             .catch(() => {
-              setVideo("none");
+              dispatchVideo({ type: "END" });
               ps.sendControl("video-end");
               showNotice("Camera unavailable.");
             });
@@ -305,7 +314,7 @@ export default function Home() {
         break;
       case "video-decline":
         if (videoRef.current === "requesting") {
-          setVideo("none");
+          dispatchVideo({ type: "END" });
           showNotice("Video declined.");
         }
         break;
@@ -313,7 +322,7 @@ export default function Home() {
         ps?.stopVideo();
         setLocalStream(null);
         setRemoteStream(null);
-        setVideo("none");
+        dispatchVideo({ type: "END" });
         resetPresence();
         break;
       case "presence-present":
@@ -431,7 +440,7 @@ export default function Home() {
 
   function startVideoRequest() {
     if (videoRef.current !== "none" || !peerRef.current) return;
-    setVideo("requesting");
+    dispatchVideo({ type: "REQUEST_OUTGOING" });
     peerRef.current.sendControl("video-request");
   }
 
@@ -442,18 +451,18 @@ export default function Home() {
       .then((stream) => {
         setLocalStream(stream);
         ps.sendControl("video-accept");
-        setVideo("active");
+        dispatchVideo({ type: "ACTIVATE" });
       })
       .catch(() => {
         ps.sendControl("video-decline");
-        setVideo("none");
+        dispatchVideo({ type: "END" });
         showNotice("Camera unavailable.");
       });
   }
 
   function declineVideo() {
     peerRef.current?.sendControl("video-decline");
-    setVideo("none");
+    dispatchVideo({ type: "END" });
   }
 
   function endVideo() {
@@ -462,7 +471,7 @@ export default function Home() {
     ps?.sendControl("video-end");
     setLocalStream(null);
     setRemoteStream(null);
-    setVideo("none");
+    dispatchVideo({ type: "END" });
     resetPresence();
   }
 
