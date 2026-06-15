@@ -6,13 +6,13 @@ export type PeerControl =
   | "video-accept"
   | "video-decline"
   | "video-end"
-  // Phase 4 "Reciprocal Video" presence shield. Sent over the existing data
+  // Presence shield. Sent over the existing data
   // channel via sendControl(). "presence-present" doubles as the periodic
   // heartbeat (fail-closed: a peer is treated as away until one arrives and if
   // they stop arriving); "presence-away" is the explicit instant cut.
   | "presence-present"
   | "presence-away"
-  // Phase 5 "Mute & Camera Controls". Sent over data channel via sendControl()
+  // "Mute & Camera Controls". Sent over data channel via sendControl()
   // to signal user-initiated mute/unmute and manual camera on/off (distinct
   // from presence-gating). "audio-mute/unmute" gates outgoing audio tracks;
   // "video-manual-off/on" gates outgoing video independently of presence.
@@ -37,7 +37,7 @@ interface PeerCallbacks {
   // message by id, not array position. P2P-only, never touches the server.
   onDelivered: (id: number) => void;
   onControl: (ctrl: PeerControl) => void;
-  // Phase 4 typing indicator. Fired when the peer's typing state flips. Rides
+  // Typing indicator. Fired when the peer's typing state flips. Rides
   // the existing data channel via a {t:"typing", on} message — fully ephemeral,
   // never stored (consistent with the app's no-persistence privacy model).
   onTyping: (isTyping: boolean) => void;
@@ -57,8 +57,8 @@ const ICE_CONFIG: RTCConfiguration = {
 //
 // NOTE: the backend issues TURN credentials with a 600s (10 min) TTL. For
 // calls longer than the TTL the relayed candidates expire. A full ICE-restart
-// refresh is out of scope for this phase (stakeholder ruling); a long-lived
-// active call should re-fetch creds before expiry. TODO(phase-4): refresh ICE
+// refresh is out of scope (stakeholder ruling); a long-lived active call
+// should re-fetch creds before expiry. A future refresh would re-fetch ICE
 // servers ~30s before the 600s TTL elapses and renegotiate.
 export async function buildICEConfig(
   id?: string,
@@ -321,7 +321,7 @@ export class PeerSession {
     this.safeSend({ t: "ctrl", ctrl });
   }
 
-  // Phase 4 typing indicator. Broadcasts the local typing state to the peer
+  // Typing indicator. Broadcasts the local typing state to the peer
   // over the existing data channel. safeSend() no-ops if the channel isn't
   // open, so this is safe to call at any point in the session lifecycle.
   sendTyping(on: boolean): void {
@@ -374,7 +374,7 @@ export class PeerSession {
     return this.localStream;
   }
 
-  // Gate the OUTGOING video: the protective core of the Phase 4 presence shield.
+  // Gate the OUTGOING video: the protective core of the presence shield.
   // Setting track.enabled = false makes the sender transmit black frames while
   // audio keeps flowing, so no clear video reaches the peer unless both sides
   // are present. This is intentionally the reliable primitive: a CSS/canvas

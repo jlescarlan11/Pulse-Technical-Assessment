@@ -3,12 +3,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /* ============================================================
-   Phase 4 — Reciprocal Video copy (Story 6: HONEST COPY)
+   Reciprocal Video copy — HONEST COPY
    Presence == "the browser tab is active". These strings must
    never imply eye/gaze tracking, watching, or that screenshots
    are prevented. Centralised so a reviewer can audit one block.
 
-   Phase 4 Privacy Shield update: the WebRTC layer now keeps the
+   Privacy Shield update: the WebRTC layer now keeps the
    LOCAL self-view camera track ALWAYS LIVE and gates only a
    separate clone sent to the peer. So the PiP <video> shows your
    live camera even while the OUTGOING feed is held back. The PiP
@@ -21,14 +21,14 @@ const COPY = {
   // Pre-call (unchanged): before any remote stream has arrived.
   waiting: "Waiting for stranger’s video…",
 
-  // M5 (video) — escalated pre-call copy. If the peer accepted video but no
+  // Escalated pre-call copy. If the peer accepted video but no
   // remoteStream arrives after a grace window, the camera may be stuck. Soften
   // the wording and lean on the always-available End button instead of waiting
   // forever. Honest: it names a likely camera problem, no presence/gaze claims.
   waitingSlow: "Still waiting — they may be having camera trouble",
   waitingSlowHint: "You can leave anytime with End video below.",
 
-  // Story 4 — remote feed, mid-call, stranger's tab is inactive.
+  // Remote feed, mid-call, stranger's tab is inactive.
   peerAwayTitle: "Stranger stepped away",
   peerAwayBody: "Their video pauses while their tab is inactive. Audio is still connected.",
 
@@ -37,7 +37,7 @@ const COPY = {
   // must fit on one line at the ~128px PiP width. The full-screen overlay
   // already carries the "why", so the PiP never repeats a long explanation.
   //
-  // FIX 1: the badge no longer renders a wrapping sub-line. Each gated case
+  // The badge no longer renders a wrapping sub-line. Each gated case
   // picks one of these short, one-line labels. All are honest tab/presence
   // language (no gaze/screenshot claims) and short enough not to wrap; the pill
   // also truncates gracefully as a final guard.
@@ -49,7 +49,7 @@ const COPY = {
   // Your own tab is backgrounded, so the engine stopped sending your clone.
   notSharedLocalAway: "Tab in background",
 
-  // BUG-2 — pre-first-heartbeat. peerAway initialises true (fail-closed) for
+  // Pre-first-heartbeat. peerAway initialises true (fail-closed) for
   // ~1 RTT, so the outgoing clone is held before the stranger has ever been
   // seen present. Don't blame them — a neutral connecting label.
   notSharedConnecting: "Connecting…",
@@ -57,19 +57,19 @@ const COPY = {
   // The normal "You" label on the live self-view when mutually present.
   selfLabel: "You",
 
-  // M5 — top HUD pill. Reads "Live" when both present; when the stranger
+  // Top HUD pill. Reads "Live" when both present; when the stranger
   // has stepped away it drops the pulse and reads a calm "Away" so the HUD
   // agrees with the full-screen "Stranger stepped away" overlay.
   pillLive: "Live",
   pillAway: "Away",
 
-  // Story 7 — aria-live announcements for presence transitions. These describe
+  // Aria-live announcements for presence transitions. These describe
   // sharing/presence honestly: tab/presence language, never gaze/watching.
   announcePeerAway: "Stranger stepped away. Your video is no longer shared with them while they’re away.",
   announcePeerBack: "Stranger is back. Your video is shared again.",
   announceLocalBack: "You’re back. Your video is shared again.",
 
-  // Phase 5 — mute and camera controls. Honest copy: states what is sent/not sent,
+  // Mute and camera controls. Honest copy: states what is sent/not sent,
   // never privacy theater ("your audio is secure"). Simple icon+label, no wrapping.
   muteLabel: "Mute",
   unmuteLabel: "Unmute",
@@ -78,7 +78,7 @@ const COPY = {
   peerMutedBadge: "Muted",
   peerCameraOffBadge: "Camera off",
 
-  // Phase 5 — local PiP badge when YOU turn your own camera off. The self-view
+  // Local PiP badge when YOU turn your own camera off. The self-view
   // stays live (you still see yourself), but the peer receives black. Honest:
   // states that this view is only yours, never claims to stop recording.
   notSharedCameraOff: "Off · only you see this",
@@ -101,12 +101,12 @@ type VideoPanelProps = {
    */
   localAway: boolean;
   /**
-   * Phase 5 — user manually muted audio (independent of presence gating).
+   * User manually muted audio (independent of presence gating).
    */
   isMuted: boolean;
   onToggleMute: () => void;
   /**
-   * Phase 5 — user manually turned off camera (independent of presence gating).
+   * User manually turned off camera (independent of presence gating).
    */
   isCameraOn: boolean;
   onToggleCamera: () => void;
@@ -143,27 +143,27 @@ export default function VideoPanel({
   // no setState-in-effect and no ref reads during render.
   //
   // hasConnected: latches true once a remote stream has ever arrived. From then
-  // on, "Stranger stepped away" (mid-call, Story 4) replaces the pre-call
+  // on, "Stranger stepped away" (mid-call) replaces the pre-call
   // "Waiting…" state even if peerAway later flips true. This is what makes
-  // Story 4 distinct from the existing waiting state.
+  // Distinct from the existing waiting state.
   const [hasConnected, setHasConnected] = useState(false);
   if (remoteStream && !hasConnected) setHasConnected(true);
 
-  // M3 (call-start flicker): peerAway initialises true (fail-closed), so a
+  // peerAway initialises true (fail-closed), so a
   // fresh call could flash the "Stranger stepped away" overlay in the gap
   // between "Waiting…" and the first live frame. This latch flips true the
   // first time peerAway is observed false (i.e. the stranger was actually
   // present). The mid-call stepped-away overlay is gated on it, so a new call
   // shows waiting -> live, never waiting -> stepped-away -> live.
   //
-  // BUG-1: freshness per call is NOT provided by a key in page.tsx (there is
+  // Freshness per call is NOT provided by a key in page.tsx (there is
   // none). page.tsx renders VideoPanel only while video === "active", so the
   // component unmounts when the call ends and remounts on the next call — and
   // this latch, living in component state, resets naturally on that unmount.
   const [peerHasBeenPresent, setPeerHasBeenPresent] = useState(false);
   if (!peerAway && !peerHasBeenPresent) setPeerHasBeenPresent(true);
 
-  // Story 7 — announce presence transitions for screen readers. We keep the
+  // Announce presence transitions for screen readers. We keep the
   // previously-seen booleans in state and compare during render, publishing a
   // short, honest message into the polite aria-live region on each change.
   const [announcement, setAnnouncement] = useState("");
@@ -171,7 +171,7 @@ export default function VideoPanel({
   const [seenLocalAway, setSeenLocalAway] = useState(localAway);
   if (peerAway !== seenPeerAway) {
     setSeenPeerAway(peerAway);
-    // BUG-5: only narrate the stranger stepping away under the SAME condition
+    // Only narrate the stranger stepping away under the SAME condition
     // that shows the visual overlay (hasConnected && peerHasBeenPresent), so a
     // screen reader can never say "Stranger stepped away" while the screen
     // still reads "Waiting…" / "Live" pre-heartbeat. The peer's RETURN stays
@@ -188,7 +188,7 @@ export default function VideoPanel({
     if (!localAway) setAnnouncement(COPY.announceLocalBack);
   }
 
-  // M5 (video) — slow-connect escalation. Mirrors ChatPanel's slowConnect: if
+  // Slow-connect escalation. Mirrors ChatPanel's slowConnect: if
   // the pre-call "Waiting…" state persists past a grace window with no remote
   // stream, the peer's camera may be stuck, so we soften the copy and reinforce
   // that End is available. Purely presentational; the timer is cleaned up on
@@ -228,24 +228,24 @@ export default function VideoPanel({
   // The local-away cause wins the badge because it describes YOUR own tab
   // state; the peer-attributed label is for when you're present but holding.
   //
-  // M3: gate the mid-call overlay on peerHasBeenPresent so the fail-closed
+  // Gate the mid-call overlay on peerHasBeenPresent so the fail-closed
   // initial peerAway=true never flashes the overlay before the first frame.
   const showPeerAwayOverlay = hasConnected && peerAway && peerHasBeenPresent;
 
   // Outgoing clone held: the self-view stays live — this only drives the
-  // non-blocking "not shared" badge over the PiP. Phase 5: a manual camera-off
+  // non-blocking "not shared" badge over the PiP. A manual camera-off
   // also holds the outgoing feed (the user turned it off on purpose), so the
   // PiP must explain that they still see themselves but the peer does not.
   const outgoingHeld = localAway || peerAway || !isCameraOn;
 
-  // BUG-2: the badge must only blame the stranger once they have actually been
+  // The badge must only blame the stranger once they have actually been
   // seen present — the same peerHasBeenPresent latch the full-screen overlay
   // uses. Before the first heartbeat peerAway is still its fail-closed `true`,
   // so we attribute the hold to nothing and fall through to the neutral
   // "Connecting…" label instead.
   const heldByPeer = !localAway && peerAway && peerHasBeenPresent;
 
-  // m1 (no escape hatch): a full-screen stepped-away overlay could otherwise
+  // A full-screen stepped-away overlay could otherwise
   // sit on top of an auto-calmed control bar, hiding the End button. Whenever
   // any stepped-away overlay is showing — or the remote video hasn't arrived —
   // we force the controls to stay up, mirroring the pre-stream behaviour.
@@ -282,8 +282,8 @@ export default function VideoPanel({
     [],
   );
 
-  // FIX 1 — the PiP badge is a SINGLE compact pill: a short, one-line label
-  // chosen by the attribution the matrix above describes. Phase 5: a deliberate
+  // The PiP badge is a SINGLE compact pill: a short, one-line label
+  // chosen by the attribution the matrix above describes. A deliberate
   // camera-off wins over everything (it's the user's own explicit action), then
   // localAway (your own tab), then the peer-attributed default once they've been
   // present; otherwise the neutral pre-heartbeat connecting label. No wrapping
@@ -304,7 +304,7 @@ export default function VideoPanel({
       onPointerDown={wake}
       onKeyDown={wake}
     >
-      {/* Story 7 — polite presence announcer (visually hidden, SR-only). */}
+      {/* Polite presence announcer (visually hidden, SR-only). */}
       <div role="status" aria-live="polite" className="sr-only">
         {announcement}
       </div>
@@ -323,7 +323,7 @@ export default function VideoPanel({
           <div className="absolute inset-0 flex flex-col items-center justify-center gap-6 bg-ink-950">
             <div className="aurora-field opacity-40" />
             <div className="relative flex h-28 w-28 items-center justify-center">
-              {/* M4 — the expanding rings animate normally, but carry a non-zero
+              {/* The expanding rings animate normally, but carry a non-zero
                   resting opacity so prefers-reduced-motion (which freezes the
                   animation on frame 0) still leaves a visible static halo. */}
               {[0, 1.4].map((d) => (
@@ -343,7 +343,7 @@ export default function VideoPanel({
                 </svg>
               </span>
             </div>
-            {/* M5 (video) — escalate after the grace window. Before that, the
+            {/* Escalate after the grace window. Before that, the
                 calm pre-call copy; after, softer "camera trouble" wording plus
                 a hint that End is always available. aria-live=polite so a screen
                 reader hears the escalation without it stealing focus; no motion,
@@ -365,7 +365,7 @@ export default function VideoPanel({
           </div>
         )}
 
-        {/* Story 4 — "Stranger stepped away" (mid-call). Rendered OUTSIDE the
+        {/* "Stranger stepped away" (mid-call). Rendered OUTSIDE the
             controls-calm block so the auto-calm timer can never hide it. Blur +
             darken + icon + text; reduced-motion users get the same overlay with
             the crossfade collapsed by globals.css (no looping animation here). */}
@@ -388,7 +388,7 @@ export default function VideoPanel({
           </div>
         )}
 
-        {/* Phase 5 — peer's mute/camera badges. Stacked in the TOP-RIGHT corner
+        {/* Peer's mute/camera badges. Stacked in the TOP-RIGHT corner
             so they never collide with the top-left "Live"/"Away" presence pill.
             They sit OUTSIDE the auto-calm region so they stay visible without
             needing the controls up. Icon + label, same honest framing as the
@@ -446,7 +446,7 @@ export default function VideoPanel({
         )}
 
         {/* Top scrim + presence indicator (auto-calms with controls).
-            M5 — the pill reflects presence so the HUD agrees with the overlay:
+            The pill reflects presence so the HUD agrees with the overlay:
             mutually present => pulsing "Live" (danger dot); stranger away =>
             calm, dimmed "Away" with a steady (non-pulsing) haze dot, conveyed
             by icon + text, never colour alone. */}
@@ -490,7 +490,7 @@ export default function VideoPanel({
             />
 
             {outgoingHeld ? (
-              /* FIX 1 — "Not shared" badge as a SINGLE compact pill: icon + one
+              /* "Not shared" badge as a SINGLE compact pill: icon + one
                  short label, no wrapping sub-line. The live face above stays
                  fully visible; a subtle scrim strip only seats the pill for
                  legible contrast. State is conveyed by icon + text (never colour

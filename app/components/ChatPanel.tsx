@@ -429,7 +429,7 @@ export default function ChatPanel({
           {/* Divider: sets the constructive control (video) apart from the
               destructive pair, so the row parses as "talk more │ leave". */}
           <span aria-hidden className="mx-0.5 h-5 w-px rounded-full bg-haze-200/15" />
-          {/* Danger pair (Story 3 AC1 + Phase 4): two escalating, LABELED
+          {/* Danger pair: two escalating, LABELED
               actions, both COOLED at rest so the header never reads as
               aggressive while the conversation is healthy. Severity is still
               encoded by WEIGHT — but the weight now reveals on hover/intent
@@ -487,7 +487,7 @@ export default function ChatPanel({
 
       {/* Messages */}
       <div ref={listRef} className="flex-1 space-y-2.5 overflow-y-auto px-4 py-5">
-        {/* FIX 3 (M4) — the empty message area has two distinct calm states so
+        {/* The empty message area has two distinct calm states so
             the body never contradicts the composer:
               - NOT connected (handshake): a quiet connecting-specific state
                 that matches the header "Connecting…/Still connecting…" status
@@ -679,7 +679,7 @@ export default function ChatPanel({
 
       {/* Composer */}
       <form onSubmit={submit} className="hairline border-t p-3">
-        {/* Cooldown notice (Story 2): when we've hit our own send budget only
+        {/* Cooldown notice: when we've hit our own send budget only
             SENDING pauses — the input stays live so you can keep composing your
             next line and never lose focus mid-flow. We auto-re-enable as a token
             refills. The voice is system-state ("catching up"), not a scolding
