@@ -470,3 +470,88 @@ describe("VideoPanel camera-filter picker — audit fixes", () => {
     ).toBeInTheDocument();
   });
 });
+
+describe("VideoPanel camera-filter picker — gap coverage (test-engineer)", () => {
+  function liveRegion() {
+    return screen.getByRole("status");
+  }
+
+  // The self-view is the MUTED <video> (the remote one is not muted). We read
+  // its inline `filter` style directly — that grade is what the user previews
+  // and, because both sides import the same css constant, what the peer gets.
+  function selfView(container: HTMLElement): HTMLVideoElement {
+    const videos = Array.from(container.querySelectorAll("video"));
+    const local = videos.find((v) => (v as HTMLVideoElement).muted);
+    if (!local) throw new Error("self-view (muted) <video> not found");
+    return local as HTMLVideoElement;
+  }
+
+  it("opening the picker exposes a radiogroup with exactly 4 radios", () => {
+    renderPanel({ selectedFilter: "none" });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
+    expect(screen.getAllByRole("radio")).toHaveLength(4);
+  });
+
+  it("exactly the effective selectedFilter radio is aria-checked", () => {
+    renderPanel({ selectedFilter: "warm" });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    const checked = screen
+      .getAllByRole("radio")
+      .filter((r) => r.getAttribute("aria-checked") === "true");
+    expect(checked).toHaveLength(1);
+    expect(checked[0]).toHaveAccessibleName(/WARM/);
+  });
+
+  it("the toggle's aria-expanded flips true when the picker opens", () => {
+    renderPanel({ selectedFilter: "none" });
+    const toggle = screen.getByRole("button", { name: /Camera filter/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    fireEvent.click(toggle);
+    expect(toggle).toHaveAttribute("aria-expanded", "true");
+  });
+
+  it("self-view <video> carries the WARM colour-grade css filter", () => {
+    const { container } = renderPanel({ selectedFilter: "warm" });
+    expect(selfView(container).style.filter).toBe(
+      "sepia(0.45) saturate(1.25) brightness(1.05) contrast(1.05)",
+    );
+  });
+
+  it("self-view <video> has NO filter style on 'none' (plain live camera)", () => {
+    const { container } = renderPanel({ selectedFilter: "none" });
+    expect(selfView(container).style.filter).toBe("");
+  });
+
+  it("HONEST fallback: a requested 'night' that comes back effective 'none' shows none checked, no self-view grade, and the unavailable announcement", () => {
+    // Drive the requested-vs-effective split through the real onClick path: the
+    // user picks NIGHT, but the controlled selectedFilter prop stays "none"
+    // (the parent's setFilter reported the canvas pipeline was unavailable).
+    const onSelectFilter = jest.fn();
+    const { rerender, container } = renderPanel({
+      selectedFilter: "none",
+      onSelectFilter,
+    });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /NIGHT/ }));
+    expect(onSelectFilter).toHaveBeenCalledWith("night");
+
+    // Effective stays "none" — the picker must not pretend NIGHT applied.
+    rerender(panel({ selectedFilter: "none", onSelectFilter }));
+
+    // 1) The announcer tells the truth: unfiltered video is being sent.
+    expect(
+      within(liveRegion()).getByText("Filter unavailable — sending unfiltered video."),
+    ).toBeInTheDocument();
+    // 2) The self-view shows no grade (it would be a lie to tint only the local
+    //    preview when the peer receives plain video).
+    expect(selfView(container).style.filter).toBe("");
+    // 3) Re-opening the picker shows NONE checked, never NIGHT.
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    const checked = screen
+      .getAllByRole("radio")
+      .filter((r) => r.getAttribute("aria-checked") === "true");
+    expect(checked).toHaveLength(1);
+    expect(checked[0]).toHaveAccessibleName(/NONE/);
+  });
+});

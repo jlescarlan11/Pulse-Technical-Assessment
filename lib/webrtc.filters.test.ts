@@ -474,3 +474,244 @@ describe("PeerSession.stopVideo — filter cleanup", () => {
     expect(cancelledRafIds).toHaveLength(0);
   });
 });
+
+// ===========================================================================
+// Gap-closing tests (test-engineer): harden the PRIVACY INVARIANT and the
+// lifecycle/resource paths the original ~17 did not assert directly. Same fake
+// MediaStream / RTCPeerConnection / canvas style as above — no new mocking
+// approach, no real getUserMedia / network / DOM.
+// ===========================================================================
+
+// Count the video senders currently on the fake pc. addTrack pushes a sender;
+// removeTrack/replaceTrack never add one. So a swap that stays at exactly ONE
+// video sender proves replaceTrack (not removeTrack+addTrack) was used — i.e.
+// no renegotiation path was taken.
+function videoSenderCount(ps: PeerSession): number {
+  const pc = (ps as unknown as { pc: FakeRTCPeerConnection }).pc;
+  return pc.senders.filter((s) => s.track?.kind === "video").length;
+}
+
+// --- privacy invariant: gate follows the live track across swaps -----------
+
+describe("PeerSession.setFilter — privacy invariant (gate follows the live track)", () => {
+  it("after a swap, setOutgoingVideoEnabled(true) then (false) still gates the CANVAS track", async () => {
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+
+    ps.setFilter("warm");
+    const canvasTrack = created.canvases[0].capturedTrack!;
+
+    // The gate now operates on the swapped-in canvas track, not the raw clone.
+    ps.setOutgoingVideoEnabled(true);
+    expect(canvasTrack.enabled).toBe(true);
+    expect(videoSender(ps).track!.enabled).toBe(true);
+
+    ps.setOutgoingVideoEnabled(false);
+    expect(canvasTrack.enabled).toBe(false);
+    // The sender carries the gated canvas track — no clear frame can escape.
+    expect(videoSender(ps).track).toBe(canvasTrack);
+    expect(videoSender(ps).track!.enabled).toBe(false);
+  });
+
+  it("swapping back to 'none' returns the RAW clone born at the CURRENT (closed) gate state", async () => {
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+    const rawClone = videoSender(ps).track; // the raw clone object
+
+    // Open the gate, turn a filter on (canvas track born open), then close the
+    // gate again BEFORE swapping back to none.
+    ps.setOutgoingVideoEnabled(true);
+    ps.setFilter("night");
+    const canvasTrack = created.canvases[0].capturedTrack!;
+    expect(canvasTrack.enabled).toBe(true);
+
+    ps.setOutgoingVideoEnabled(false);
+    expect(canvasTrack.enabled).toBe(false);
+
+    // none-swap: the raw clone comes back, and swapSentTrack must re-stamp it at
+    // the CURRENT gate (closed) so it can't return ungated.
+    expect(ps.setFilter("none")).toBe("none");
+    expect(videoSender(ps).track).toBe(rawClone);
+    expect(rawClone!.enabled).toBe(false);
+  });
+
+  it("swapping back to 'none' while the gate is OPEN returns the raw clone enabled", async () => {
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+    const rawClone = videoSender(ps).track;
+
+    ps.setOutgoingVideoEnabled(true);
+    ps.setFilter("mono");
+    expect(created.canvases[0].capturedTrack!.enabled).toBe(true);
+
+    // Gate still open on the swap-back: the raw clone must keep flowing (no false
+    // black frame on the return swap).
+    expect(ps.setFilter("none")).toBe("none");
+    expect(videoSender(ps).track).toBe(rawClone);
+    expect(rawClone!.enabled).toBe(true);
+  });
+});
+
+// --- no renegotiation: replaceTrack only, never add/removeTrack ------------
+
+describe("PeerSession.setFilter — never renegotiates", () => {
+  it("a none->grade swap keeps exactly ONE video sender (replaceTrack, not add/remove)", async () => {
+    installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+    const sender = videoSender(ps);
+
+    expect(videoSenderCount(ps)).toBe(1);
+    ps.setFilter("warm");
+    // Still one video sender: a removeTrack+addTrack pair would have changed the
+    // count and triggered onnegotiationneeded in a real pc. replaceTrack did not.
+    expect(videoSenderCount(ps)).toBe(1);
+    expect(sender.replaceTrack).toHaveBeenCalledTimes(1);
+  });
+
+  it("a full none->night->warm->mono->none round-trip never grows the sender list", async () => {
+    installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+    const sender = videoSender(ps);
+
+    for (const id of ["night", "warm", "mono", "none"] as const) {
+      ps.setFilter(id);
+      expect(videoSenderCount(ps)).toBe(1);
+    }
+    // Two swaps total: none->night (build) and mono->none (teardown). The two
+    // mid-chain non-none switches repaint only — no replaceTrack.
+    expect(sender.replaceTrack).toHaveBeenCalledTimes(2);
+  });
+
+  it("emits no outgoing signal (offer) as a side effect of setFilter", async () => {
+    // A renegotiation would surface as an onSignal('offer'); wire a spy callback
+    // and assert setFilter stays silent.
+    installBrowserFakes({ captureStreamSupported: true });
+    const onSignal = jest.fn();
+    installRtcAndMedia([makeTrack("video"), makeTrack("audio")]);
+    const ps = new PeerSession(true, { ...noopCallbacks, onSignal });
+    await ps.startVideo();
+    onSignal.mockClear();
+
+    ps.setFilter("warm");
+    ps.setFilter("mono");
+    ps.setFilter("none");
+
+    expect(onSignal).not.toHaveBeenCalled();
+  });
+});
+
+// --- honest fallback leaves a GATED raw clone (no ungated track stranded) ---
+
+describe("PeerSession.setFilter — fallback never strands an ungated track", () => {
+  it("captureStream UNAVAILABLE: sender keeps the gated raw clone (enabled stays false)", async () => {
+    installBrowserFakes({ captureStreamSupported: false });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+    const rawClone = videoSender(ps).track;
+
+    expect(ps.setFilter("night")).toBe("none");
+    // No swap, and the raw clone is still gated closed — the fallback must not
+    // leave any ungated track in a sender.
+    expect(videoSender(ps).track).toBe(rawClone);
+    expect(rawClone!.enabled).toBe(false);
+    expect(videoSender(ps).replaceTrack).not.toHaveBeenCalled();
+  });
+
+  it("captureStream THROWS: returns 'none', keeps the gated raw clone, leaves no rAF loop", async () => {
+    // Same fakes, but captureStream is present and THROWS — exercising the
+    // try/catch fallback path (distinct from the 'method absent' path above).
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+    const rawClone = videoSender(ps).track;
+    // Patch the next-created canvas to throw on captureStream.
+    const origCreate = (global as Record<string, unknown>).document as {
+      createElement: jest.Mock;
+    };
+    const realImpl = origCreate.createElement.getMockImplementation()!;
+    origCreate.createElement.mockImplementation((tag: string) => {
+      const el = realImpl(tag);
+      if (tag === "canvas") {
+        (el as unknown as FakeCanvas).captureStream = jest.fn(() => {
+          throw new Error("captureStream blew up");
+        });
+      }
+      return el;
+    });
+
+    expect(ps.setFilter("warm")).toBe("none");
+    // THE PRIVACY POINT: whatever the sender ends up carrying, it is the raw
+    // clone AND it is gated. The catch path re-swaps the raw clone via
+    // swapSentTrack (which re-stamps .enabled to the stored closed gate), so a
+    // replaceTrack call is allowed here — but it must never leave an ungated
+    // track in the sender.
+    expect(videoSender(ps).track).toBe(rawClone);
+    expect(rawClone!.enabled).toBe(false);
+    expect(videoSender(ps).track!.enabled).toBe(false);
+    // No draw loop was left scheduled by the half-built-then-torn-down pipeline.
+    expect(rafCallbacks).toHaveLength(0);
+    expect(created.canvases.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+// --- lifecycle: rapid switching keeps exactly one pipeline live ------------
+
+describe("PeerSession.setFilter — rapid switching never leaks a pipeline", () => {
+  it("none->night->warm->mono->none builds ONE canvas, repaints between grades, tears it down once", async () => {
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const ps = await sessionWithTracks([makeTrack("video"), makeTrack("audio")]);
+
+    ps.setFilter("night"); // build pipeline (1 canvas)
+    const canvasTrack = created.canvases[0].capturedTrack!;
+    expect(created.canvases).toHaveLength(1);
+
+    ps.setFilter("warm"); // repaint only — no new canvas, same track
+    ps.setFilter("mono"); // repaint only
+    expect(created.canvases).toHaveLength(1);
+    expect(videoSender(ps).track).toBe(canvasTrack);
+
+    ps.setFilter("none"); // teardown — the single canvas track is released
+    // The canvas track is stopped (released) on teardown. The source holds it via
+    // both filterTrack and filterStream, so stop() may be invoked through more
+    // than one reference — stop() is idempotent, so the invariant we assert is
+    // "released", not a brittle exact call count.
+    expect(canvasTrack.stop).toHaveBeenCalled();
+
+    // Re-activating builds a FRESH pipeline (a second canvas), proving the first
+    // was fully released rather than reused/leaked.
+    ps.setFilter("warm");
+    expect(created.canvases).toHaveLength(2);
+  });
+});
+
+// --- stopVideo never stops a track twice -----------------------------------
+
+describe("PeerSession.stopVideo — releases each track exactly once", () => {
+  it("with a filter active, stops the canvas track once and the raw clone once", async () => {
+    const created = installBrowserFakes({ captureStreamSupported: true });
+    const video = makeTrack("video");
+    const ps = await sessionWithTracks([video, makeTrack("audio")]);
+    ps.setFilter("night");
+    const canvasTrack = created.canvases[0].capturedTrack!;
+    const rawClone = video.cloned!; // the clone created in startVideo
+
+    ps.stopVideo();
+
+    // The canvas track is released. The raw clone is the track the
+    // `sentVideoTrack !== rawClone` guard specifically protects from a DOUBLE
+    // stop, so it must be stopped EXACTLY once even though sentVideoTrack (the
+    // canvas track) is also stopped separately.
+    expect(canvasTrack.stop).toHaveBeenCalled();
+    expect(rawClone.stop).toHaveBeenCalledTimes(1);
+  });
+
+  it("on 'none' (sentVideoTrack IS rawClone), stops the single clone exactly once", async () => {
+    installBrowserFakes({ captureStreamSupported: true });
+    const video = makeTrack("video");
+    const ps = await sessionWithTracks([video, makeTrack("audio")]);
+    const rawClone = video.cloned!;
+
+    // No filter ever active: sentVideoTrack === rawClone, so the guard must avoid
+    // a double stop on the same object.
+    ps.stopVideo();
+    expect(rawClone.stop).toHaveBeenCalledTimes(1);
+  });
+});
