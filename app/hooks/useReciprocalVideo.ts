@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import type { PeerSession } from "@/lib/webrtc";
 import type { VideoState } from "../state/videoReducer";
+import { DEFAULT_FILTER_ID, type FilterPresetId } from "@/lib/videoFilters";
 import { useRefState } from "./useRefState";
 
 // ── Reciprocal Video (mutual-presence) tuning ──
@@ -17,9 +18,12 @@ export interface UseReciprocalVideo {
   isCameraOn: boolean;
   peerMuted: boolean;
   peerCameraOn: boolean;
+  // EFFECTIVE camera filter (cosmetic colour-grade) actually in effect.
+  selectedFilter: FilterPresetId;
   // ── user toggles (wired to VideoPanel) ──
   toggleMute: () => void;
   toggleCamera: () => void;
+  selectFilter: (id: FilterPresetId) => void;
   // ── inbound control-message handlers (called from page's handleControl) ──
   // The caller guards these on video === "active"; they update presence state
   // and re-apply the gate.
@@ -62,6 +66,16 @@ export function useReciprocalVideo(
   // Peer's mute/camera state, set from inbound control messages.
   const [peerMuted, setPeerMuted] = useState(false);
   const [peerCameraOn, setPeerCameraOn] = useState(true);
+
+  // Camera filter (cosmetic colour-grade). Holds the EFFECTIVE preset id — the
+  // one PeerSession.setFilter() reported actually in effect — never the user's
+  // raw request. So if the browser can't build the canvas pipeline and the
+  // engine falls back to "none", this state reflects that honest fallback and
+  // the picker/self-view never claim a grade the peer isn't receiving. No
+  // persistence: each call starts at DEFAULT_FILTER_ID and resetControls() (on
+  // teardown) resets it, consistent with the app's no-persistence model.
+  const [selectedFilter, setSelectedFilter] =
+    useState<FilterPresetId>(DEFAULT_FILTER_ID);
 
   // localAway: this tab has stepped away (hidden/pagehide). peerAway: the
   // stranger has — fail-closed (assume away until the first heartbeat arrives).
@@ -126,12 +140,13 @@ export function useReciprocalVideo(
     lastPeerPresentAt.current = 0;
   }
 
-  // Reset manual mute/camera state on full teardown.
+  // Reset manual mute/camera/filter state on full teardown.
   function resetControls() {
     setIsMuted(false);
     setIsCameraOn(true);
     setPeerMuted(false);
     setPeerCameraOn(true);
+    setSelectedFilter(DEFAULT_FILTER_ID);
   }
 
   function toggleMute() {
@@ -154,6 +169,19 @@ export function useReciprocalVideo(
     // instantly regardless of presence. cameraOnRef is already updated above.
     applyVideoGate();
     ps.sendControl(newCameraOn ? "video-manual-on" : "video-manual-off");
+  }
+
+  // Pick a camera filter. Honest-state binding (hard requirement): set React
+  // state from setFilter()'s RETURN VALUE — the EFFECTIVE id the engine applied,
+  // not the requested one. If the canvas pipeline can't be built the engine
+  // returns "none" and the picker + self-view fall back honestly, never showing
+  // a grade the peer isn't actually receiving. Guards a null peer exactly like
+  // toggleMute / toggleCamera. Cosmetic only: never touches the presence gate.
+  function selectFilter(id: FilterPresetId) {
+    const ps = peerRef.current;
+    if (!ps) return;
+    const effective = ps.setFilter(id);
+    setSelectedFilter(effective);
   }
 
   // The stranger's tab is active again (also the periodic heartbeat).
@@ -263,8 +291,10 @@ export function useReciprocalVideo(
     isCameraOn,
     peerMuted,
     peerCameraOn,
+    selectedFilter,
     toggleMute,
     toggleCamera,
+    selectFilter,
     notePeerPresent,
     notePeerAway,
     setPeerMuted,

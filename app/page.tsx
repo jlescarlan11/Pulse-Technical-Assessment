@@ -101,8 +101,10 @@ export default function Home() {
     isCameraOn,
     peerMuted,
     peerCameraOn,
+    selectedFilter,
     toggleMute,
     toggleCamera,
+    selectFilter,
     notePeerPresent,
     notePeerAway,
     setPeerMuted,
@@ -833,6 +835,8 @@ export default function Home() {
           onToggleCamera={toggleCamera}
           peerMuted={peerMuted}
           peerCameraOn={peerCameraOn}
+          selectedFilter={selectedFilter}
+          onSelectFilter={selectFilter}
         />
       )}
 

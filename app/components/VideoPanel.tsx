@@ -1,6 +1,11 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import {
+  FILTER_PRESETS,
+  getFilterPreset,
+  type FilterPresetId,
+} from "@/lib/videoFilters";
 
 /* ============================================================
    Reciprocal Video copy — HONEST COPY
@@ -82,6 +87,22 @@ const COPY = {
   // stays live (you still see yourself), but the peer receives black. Honest:
   // states that this view is only yours, never claims to stop recording.
   notSharedCameraOff: "Off · only you see this",
+
+  // Camera filters. A "filter" here is a purely COSMETIC colour-grade applied to
+  // BOTH the transmitted feed and this self-view — never a privacy feature, face
+  // effect, or background. The labels stay honest: "Filters" describes a look,
+  // and the menu names a "look", never "privacy" / "blur" / "hide".
+  filterLabel: "Camera filter",
+  // Accessible name for the radiogroup of presets.
+  filterGroupLabel: "Camera filter — colour grade",
+  // Aria-live announcement when a filter is committed. Names the EFFECTIVE
+  // grade the peer is actually receiving (honest), e.g. "Camera filter: Warm".
+  announceFilterPrefix: "Camera filter: ",
+  announceFilterNone: "Camera filter: off — sending unfiltered video.",
+  // Honest fallback: the user asked for a non-"none" grade but setFilter()
+  // reported "none" (canvas pipeline unavailable), so the peer gets plain video.
+  // We say so out loud rather than silently pretending the grade applied.
+  announceFilterUnavailable: "Filter unavailable — sending unfiltered video.",
 } as const;
 
 type VideoPanelProps = {
@@ -118,6 +139,20 @@ type VideoPanelProps = {
    * Peer's camera state, received via control messages.
    */
   peerCameraOn: boolean;
+  /**
+   * The EFFECTIVE camera filter preset id currently in effect — i.e. the value
+   * PeerSession.setFilter() reported is actually being transmitted, not the
+   * user's last raw request. Drives both the picker's checked option and the
+   * self-view colour grade, so the UI can never claim a filter the peer isn't
+   * receiving. "none" => no grade (plain live camera).
+   */
+  selectedFilter: FilterPresetId;
+  /**
+   * Pick a preset. The parent routes this through PeerSession.setFilter() and
+   * stores the returned EFFECTIVE id, so a browser fallback to "none" flows back
+   * down as selectedFilter honestly.
+   */
+  onSelectFilter: (id: FilterPresetId) => void;
 };
 
 export default function VideoPanel({
@@ -132,11 +167,151 @@ export default function VideoPanel({
   onToggleCamera,
   peerMuted,
   peerCameraOn,
+  selectedFilter,
+  onSelectFilter,
 }: VideoPanelProps) {
   const localRef = useRef<HTMLVideoElement>(null);
   const remoteRef = useRef<HTMLVideoElement>(null);
   const [controlsUp, setControlsUp] = useState(true);
   const calmTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Filter picker open/closed. Component-local: VideoPanel unmounts when the
+  // call ends (video !== "active") and remounts per call, so this latch — like
+  // the away/connected latches — resets naturally per call; no manual reset.
+  const [filterOpen, setFilterOpen] = useState(false);
+  // Refs to each radio option so Arrow keys can move focus within the group
+  // (the roving-tabindex pattern: only the checked option is in the tab order).
+  const optionRefs = useRef<(HTMLButtonElement | null)[]>([]);
+  // Ref to the toggle button so closing the picker (Escape, outside-click, or a
+  // committed pick) can return focus to it — a complete open/close focus loop.
+  const filterToggleRef = useRef<HTMLButtonElement>(null);
+  // Ref to the relatively-positioned wrapper that holds BOTH the toggle and the
+  // popover, so outside-interaction dismissal can test "did this land inside?".
+  const filterWrapRef = useRef<HTMLDivElement>(null);
+  // Tracks whether the close should restore focus to the toggle. Outside-click /
+  // committed-pick / Escape want focus back on the toggle; an outside-FOCUS
+  // dismissal (the user tabbed elsewhere) must NOT yank focus back. Set per call
+  // site, consumed by the close-focus effect below.
+  const restoreFocusOnClose = useRef(false);
+
+  // Close the picker. `restoreFocus` returns keyboard focus to the toggle
+  // (Escape / committed pick / outside-click); omit it for outside-FOCUS
+  // dismissal so we don't fight the user's own tab-away.
+  const closeFilter = useCallback((restoreFocus: boolean) => {
+    restoreFocusOnClose.current = restoreFocus;
+    setFilterOpen(false);
+  }, []);
+
+  // B2: on open, move keyboard focus to the currently-checked radio option so
+  // the picker is immediately operable from the keyboard. Paired with the
+  // close-paths below (Escape / commit / outside-click) that return focus to the
+  // toggle, this forms a complete focus loop. useLayoutEffect so focus moves in
+  // the same frame the popover paints (no flash of focus on the toggle).
+  useLayoutEffect(() => {
+    if (!filterOpen) {
+      // On close, optionally restore focus to the toggle (B1/S1). Reset the flag
+      // so a later focus-out dismissal doesn't accidentally re-grab focus.
+      if (restoreFocusOnClose.current) {
+        restoreFocusOnClose.current = false;
+        filterToggleRef.current?.focus();
+      }
+      return;
+    }
+    const checked = FILTER_PRESETS.findIndex((p) => p.id === selectedFilter);
+    optionRefs.current[checked >= 0 ? checked : 0]?.focus();
+    // Intentionally keyed only on filterOpen: we move focus to the checked
+    // option once per open. We do NOT depend on selectedFilter here — arrow
+    // roving already handles focus while open (see S1 note), and re-running on
+    // every preview change would fight that.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [filterOpen]);
+
+  // B1: dismiss on Escape (restoring focus to the toggle) and on any
+  // pointerdown / focus that lands OUTSIDE the wrapper. Both are kept so mouse
+  // and keyboard users are covered. Listeners are attached only while the picker
+  // is open and torn down on close / unmount.
+  useEffect(() => {
+    if (!filterOpen) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        closeFilter(true);
+      }
+    };
+    const onOutside = (e: Event) => {
+      const wrap = filterWrapRef.current;
+      if (wrap && !wrap.contains(e.target as Node)) {
+        // pointerdown outside => mouse/touch dismissal: pull focus back to the
+        // toggle so keyboard users who then tab land predictably. A focusin
+        // outside => the user already moved focus elsewhere; don't yank it back.
+        closeFilter(e.type === "pointerdown");
+      }
+    };
+    document.addEventListener("keydown", onKeyDown);
+    document.addEventListener("pointerdown", onOutside);
+    document.addEventListener("focusin", onOutside);
+    return () => {
+      document.removeEventListener("keydown", onKeyDown);
+      document.removeEventListener("pointerdown", onOutside);
+      document.removeEventListener("focusin", onOutside);
+    };
+  }, [filterOpen, closeFilter]);
+
+  // Arrow-key roving within the radiogroup. Enter/Space selection is handled by
+  // the native <button>'s onClick (see commitSelect); here we add Left/Up and
+  // Right/Down to move (and PREVIEW) between options, wrapping at the ends — the
+  // standard radiogroup interaction.
+  //
+  // S1 — DELIBERATE ASYMMETRY: arrow roving applies the preset (live preview)
+  // but does NOT close the picker, so the user can roam across presets and
+  // compare looks. Only a COMMITTED pick (pointer-click or Enter/Space, both via
+  // commitSelect) closes the picker and returns focus to the toggle. Do not
+  // "fix" arrow keys to close on each move — that would break previewing.
+  // S3 — remember the user's last REQUESTED preset id so we can detect the
+  // honest canvas-unavailable fallback: a non-"none" request that comes back as
+  // an effective `selectedFilter` of "none" means the peer is getting unfiltered
+  // video, and the announcer must say so rather than imply the grade applied.
+  // Kept as STATE (not a ref) because it is read during render in the S3 compare
+  // below — react-hooks/refs forbids reading ref.current during render.
+  const [lastRequested, setLastRequested] = useState<FilterPresetId>(selectedFilter);
+
+  // Every preset request (arrow-preview AND committed pick) routes through here
+  // so lastRequested stays accurate for the S3 announcement comparison. This
+  // does NOT close the picker — closing is a separate, commit-only concern (S1).
+  const requestFilter = useCallback(
+    (id: FilterPresetId) => {
+      setLastRequested(id);
+      onSelectFilter(id);
+    },
+    [onSelectFilter],
+  );
+
+  const onRadioKeyDown = useCallback(
+    (e: React.KeyboardEvent, index: number) => {
+      const last = FILTER_PRESETS.length - 1;
+      let next = index;
+      if (e.key === "ArrowRight" || e.key === "ArrowDown") next = index === last ? 0 : index + 1;
+      else if (e.key === "ArrowLeft" || e.key === "ArrowUp") next = index === 0 ? last : index - 1;
+      else return;
+      e.preventDefault();
+      const preset = FILTER_PRESETS[next];
+      // Preview the roamed-to preset; intentionally does NOT close (S1).
+      requestFilter(preset.id);
+      optionRefs.current[next]?.focus();
+    },
+    [requestFilter],
+  );
+
+  // S1 — commit a pick (pointer-click OR Enter/Space, both fire the button's
+  // onClick): apply the preset, then close the picker and return focus to the
+  // toggle. Arrow roving above intentionally does NOT route through here.
+  const commitSelect = useCallback(
+    (id: FilterPresetId) => {
+      requestFilter(id);
+      closeFilter(true);
+    },
+    [requestFilter, closeFilter],
+  );
 
   // Presence-derived state, computed by adjusting state during render when the
   // incoming props change (React's "you might not need an effect" pattern) —
@@ -186,6 +361,35 @@ export default function VideoPanel({
     setSeenLocalAway(localAway);
     // Returning is the meaningful transition to announce for the local user.
     if (!localAway) setAnnouncement(COPY.announceLocalBack);
+  }
+
+  // S3 — announce the EFFECTIVE camera filter into the same polite region. We
+  // key the compare on the (requested, effective) PAIR, not on `selectedFilter`
+  // alone, because the HONEST fallback case never changes the effective id: the
+  // user asks for "Night" but setFilter() reports "none" (canvas pipeline
+  // unavailable), so `selectedFilter` stays "none" while `lastRequested` flips.
+  // Tracking both lets us announce "Filter unavailable — sending unfiltered
+  // video." for that fallback, the plain "filter off" message for a deliberate
+  // "None" pick, and the named grade otherwise — never implying a grade the peer
+  // isn't receiving.
+  const [seenRequested, setSeenRequested] = useState(lastRequested);
+  const [seenEffective, setSeenEffective] = useState(selectedFilter);
+  if (lastRequested !== seenRequested || selectedFilter !== seenEffective) {
+    setSeenRequested(lastRequested);
+    setSeenEffective(selectedFilter);
+    if (selectedFilter === "none") {
+      setAnnouncement(
+        lastRequested !== "none"
+          ? COPY.announceFilterUnavailable
+          : COPY.announceFilterNone,
+      );
+    } else {
+      // Title-case the uppercase preset label for a natural spoken name, e.g.
+      // "NIGHT" -> "Night" => "Camera filter: Night".
+      const label = getFilterPreset(selectedFilter).label;
+      const spoken = label.charAt(0) + label.slice(1).toLowerCase();
+      setAnnouncement(COPY.announceFilterPrefix + spoken);
+    }
   }
 
   // Slow-connect escalation. Mirrors ChatPanel's slowConnect: if
@@ -250,7 +454,10 @@ export default function VideoPanel({
   // any stepped-away overlay is showing — or the remote video hasn't arrived —
   // we force the controls to stay up, mirroring the pre-stream behaviour.
   const anyAwayOverlay = showPeerAwayOverlay || outgoingHeld;
-  const forceControls = !remoteStream || anyAwayOverlay;
+  // An OPEN filter picker also forces the controls up — mirroring how the
+  // away-overlays force them up — so the 3.5s auto-calm recede timer can never
+  // hide the control bar (and the picker rooted in it) mid-selection.
+  const forceControls = !remoteStream || anyAwayOverlay || filterOpen;
   // Visible if interaction has them up OR a forced condition holds. Deriving
   // this (rather than syncing state in an effect) keeps the forced-up cases
   // truthful without cascading renders.
@@ -296,6 +503,15 @@ export default function VideoPanel({
       : heldByPeer
         ? COPY.notSharedLabel
         : COPY.notSharedConnecting;
+
+  // S4 — derive the active-filter signals once. `filterActive` is the
+  // separately-legible "a non-none grade is in effect" state (distinct from the
+  // picker's open/closed state); `activeShortName` is the title-cased preset name
+  // used in the toggle's aria-label and tooltip so the active look is named.
+  const filterActive = selectedFilter !== "none";
+  const activeFilterLabel = getFilterPreset(selectedFilter).label;
+  const activeShortName =
+    activeFilterLabel.charAt(0) + activeFilterLabel.slice(1).toLowerCase();
 
   return (
     <div
@@ -487,6 +703,14 @@ export default function VideoPanel({
               playsInline
               muted
               className="h-full w-full object-cover"
+              // Story 3 — honest self-view: paint the SAME colour-grade currently
+              // transmitted, reusing the shared css from getFilterPreset() (never
+              // a hand-written filter string) so preview and transmit can't drift.
+              // selectedFilter is the EFFECTIVE id, so a fallback to "none" => ""
+              // => plain live camera. Presentational ONLY: it never gates, freezes
+              // or blacks out the self-view — the track stays live in every gated
+              // state exactly as before; only the colour grade changes.
+              style={{ filter: getFilterPreset(selectedFilter).css || undefined }}
             />
 
             {outgoingHeld ? (
@@ -556,6 +780,153 @@ export default function VideoPanel({
             : "pointer-events-none translate-y-3 opacity-0"
         }`}
       >
+        {/* Filter control. A relatively-positioned wrapper anchors the popover
+            picker ABOVE the button. The button toggles the picker; while the
+            picker is open `filterOpen` forces the control bar to stay up (see
+            forceControls), so the auto-calm recede timer can never hide it
+            mid-selection — mirroring how the away-overlays force controls up.
+            Cosmetic only: state is conveyed by icon + the active label, never
+            colour alone. */}
+        <div ref={filterWrapRef} className="relative">
+          {filterOpen && (
+            /* Preset picker. RADIO GROUP (stakeholder hard requirement): the
+               four presets are mutually exclusive, so role="radiogroup" +
+               role="radio"/aria-checked, NOT aria-pressed toggles. Roving
+               tabindex: only the checked option is tabbable; Arrow keys move
+               within the group (onRadioKeyDown) and Enter/Space select via the
+               native button. Glass surface, mono uppercase labels, signal accent
+               on the ACTIVE preset. The open/close uses a transition that globals
+               collapse under prefers-reduced-motion (no bespoke motion here). */
+            <div
+              role="radiogroup"
+              aria-label={COPY.filterGroupLabel}
+              // S2 — stacking + small-screen geometry. z-50 lifts the popover
+              // ABOVE the PiP self-view and the full-screen away scrim (both in
+              // the z-40 panel root) so it stays visible while showPeerAwayOverlay
+              // is up (the bar is force-shown via forceControls).
+              //
+              // Positioning: anchored to the LEFT edge of its trigger (the
+              // left-most control) and grown rightward — NOT centred on the
+              // button. Centring a wide menu on a left-of-centre button pushed
+              // its left edge off-screen at ~320px. Left-anchoring keeps the left
+              // edge on-screen at every width, and the 9rem width cap means the
+              // right edge clears the bottom-right PiP even at the 320px floor
+              // (button left ~30px + 144px = ~174px, just left of the PiP's
+              // ~176px left edge); wider screens only add clearance. 9rem
+              // comfortably fits the short uppercase preset labels + checkmark.
+              className="animate-fade-up glass absolute bottom-[4.5rem] left-0 z-50 flex w-[min(9rem,calc(100vw-2rem))] flex-col gap-1 rounded-2xl p-2 shadow-float"
+            >
+              {FILTER_PRESETS.map((preset, i) => {
+                const active = preset.id === selectedFilter;
+                return (
+                  <button
+                    key={preset.id}
+                    ref={(el) => {
+                      optionRefs.current[i] = el;
+                    }}
+                    type="button"
+                    role="radio"
+                    aria-checked={active}
+                    tabIndex={active ? 0 : -1}
+                    onClick={() => commitSelect(preset.id)}
+                    onKeyDown={(e) => onRadioKeyDown(e, i)}
+                    className={`flex items-center justify-between rounded-xl px-3 py-2 font-mono text-[11px] uppercase tracking-wider transition duration-200 ease-[var(--ease-calm)] ${
+                      active
+                        ? "bg-signal/20 text-signal"
+                        : "text-haze-200 hover:bg-haze-200/10 hover:text-haze-50"
+                    }`}
+                  >
+                    <span className="truncate">{preset.label}</span>
+                    {/* Checkmark on the active preset — state by icon + accent,
+                        never colour alone. */}
+                    {active && (
+                      <svg
+                        className="h-3.5 w-3.5 shrink-0"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="2.4"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden
+                      >
+                        <path d="M20 6L9 17l-5-5" />
+                      </svg>
+                    )}
+                  </button>
+                );
+              })}
+            </div>
+          )}
+          <button
+            ref={filterToggleRef}
+            type="button"
+            // Toggle open/closed. Closing here is a deliberate dismissal, so keep
+            // focus on this toggle (restoreFocus stays moot — focus is already
+            // here). Opening hands focus to the checked option (B2 effect).
+            onClick={() => (filterOpen ? closeFilter(true) : setFilterOpen(true))}
+            aria-haspopup="true"
+            aria-expanded={filterOpen}
+            aria-label={
+              // S4 — name the ACTIVE grade in the accessible label so the
+              // active-filter state is legible to screen readers too, separate
+              // from aria-expanded (which carries open/closed).
+              filterActive
+                ? `${COPY.filterLabel} (${activeShortName} active)`
+                : COPY.filterLabel
+            }
+            title={COPY.filterLabel}
+            // S4 — "open" and "filter-active" are now DISTINCT signals:
+            //   • open      => brighter signal fill (bg-signal/30), driven by
+            //                  filterOpen and mirrored by aria-expanded.
+            //   • active    => a non-colour-only ring (ring-1 ring-signal) PLUS a
+            //                  small filled dot badge below, so a non-"none" grade
+            //                  reads as active even at low colour perception.
+            // The old 10%-opacity-bump-only marker conflated the two and failed
+            // the state-by-more-than-colour rule.
+            className={`group relative flex h-14 w-14 items-center justify-center rounded-full shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] active:scale-95 ${
+              filterOpen ? "bg-signal/30 text-signal" : "bg-signal/20 text-signal hover:bg-signal/30"
+            } ${filterActive ? "ring-1 ring-signal" : ""}`}
+          >
+            {/* Sliders / adjustments glyph (Lucide stroke style), matching the
+                mic/camera SVGs — a colour-grade control, no privacy/eye imagery. */}
+            <svg
+              className="h-[22px] w-[22px]"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden
+            >
+              <line x1="4" y1="21" x2="4" y2="14" />
+              <line x1="4" y1="10" x2="4" y2="3" />
+              <line x1="12" y1="21" x2="12" y2="12" />
+              <line x1="12" y1="8" x2="12" y2="3" />
+              <line x1="20" y1="21" x2="20" y2="16" />
+              <line x1="20" y1="12" x2="20" y2="3" />
+              <line x1="1" y1="14" x2="7" y2="14" />
+              <line x1="9" y1="8" x2="15" y2="8" />
+              <line x1="17" y1="16" x2="23" y2="16" />
+            </svg>
+            {/* S4 — filled dot badge marking an ACTIVE non-"none" grade. A shape,
+                not just a tint — legible regardless of colour perception. Ringed
+                in the bar background so it reads against the button fill. */}
+            {filterActive && (
+              <span
+                aria-hidden
+                className="absolute right-1 top-1 h-2.5 w-2.5 rounded-full bg-signal ring-2 ring-ink-950"
+              />
+            )}
+            {/* Hover label tooltip — names the active grade when one is applied,
+                so the look is legible without opening the picker. */}
+            <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+              {filterActive ? `${COPY.filterLabel}: ${activeShortName}` : COPY.filterLabel}
+            </span>
+          </button>
+        </div>
+
         {/* Mute button — distinctive filled mic icon with slash on mute */}
         <button
           onClick={onToggleMute}
