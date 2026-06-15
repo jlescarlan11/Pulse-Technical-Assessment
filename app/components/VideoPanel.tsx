@@ -800,14 +800,21 @@ export default function VideoPanel({
             <div
               role="radiogroup"
               aria-label={COPY.filterGroupLabel}
-              // S2 — stacking + small-screen clamp. z-50 lifts the popover ABOVE
-              // the PiP self-view and the full-screen away scrim (both within the
-              // z-40 panel root) so it stays visible while showPeerAwayOverlay is
-              // up (the bar is force-shown via forceControls). The width is capped
-              // to the viewport (min(11rem, calc(100vw-2rem))) and the centered
-              // -translate-x-1/2 is clamped so at ~320px it can't clip off-screen
-              // or collide with the right-anchored PiP.
-              className="animate-fade-up glass absolute bottom-[4.5rem] left-1/2 z-50 flex w-[min(11rem,calc(100vw-2rem))] max-w-[calc(100vw-2rem)] -translate-x-1/2 flex-col gap-1 rounded-2xl p-2 shadow-float"
+              // S2 — stacking + small-screen geometry. z-50 lifts the popover
+              // ABOVE the PiP self-view and the full-screen away scrim (both in
+              // the z-40 panel root) so it stays visible while showPeerAwayOverlay
+              // is up (the bar is force-shown via forceControls).
+              //
+              // Positioning: anchored to the LEFT edge of its trigger (the
+              // left-most control) and grown rightward — NOT centred on the
+              // button. Centring a wide menu on a left-of-centre button pushed
+              // its left edge off-screen at ~320px. Left-anchoring keeps the left
+              // edge on-screen at every width, and the 9rem width cap means the
+              // right edge clears the bottom-right PiP even at the 320px floor
+              // (button left ~30px + 144px = ~174px, just left of the PiP's
+              // ~176px left edge); wider screens only add clearance. 9rem
+              // comfortably fits the short uppercase preset labels + checkmark.
+              className="animate-fade-up glass absolute bottom-[4.5rem] left-0 z-50 flex w-[min(9rem,calc(100vw-2rem))] flex-col gap-1 rounded-2xl p-2 shadow-float"
             >
               {FILTER_PRESETS.map((preset, i) => {
                 const active = preset.id === selectedFilter;

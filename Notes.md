@@ -1468,8 +1468,9 @@ Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `
 - **Zero-dimension camera (Major):** `getSettings()` can report `width:0` transiently on some drivers/virtual cameras; `?? 640` *kept* the 0 → a 0×0 canvas → black feed. Fixed to truthy `|| 640`/`|| 480` with a regression test.
 - **Night was too strong:** `hue-rotate(200deg)` turned skin cyan/alien — a costume. Retuned to a humane 18° cool tint (coolness mostly from reduced warm saturation + dim/contrast).
 - The UI/UX pass added the close/focus lifecycle, SR announcements, and the active-state marker described above.
+- **Popover small-screen geometry:** centring an 11rem menu on the left-most control button pushed its left edge ~30px off-screen at 320px. Re-anchored to the trigger's left edge, grown rightward, with a 9rem width cap so the right edge clears the bottom-right PiP even at the 320px floor (and wider screens only add clearance).
 
-**Known minor (documented, not blocking):** on resume from a backgrounded tab the canvas may hold one stale *own-face* filtered frame for ~1 frame (~40 ms) before the rAF loop ticks — bounded, not a privacy leak (it's your own face, and an *absent peer's* feed can never appear). The small-screen popover can visually overlap the PiP at ~320px (it stays usable via `z-50`).
+**Known minor (documented, not blocking):** on resume from a backgrounded tab the canvas may hold one stale *own-face* filtered frame for ~1 frame (~40 ms) before the rAF loop ticks — bounded, not a privacy leak (it's your own face, and an *absent peer's* feed can never appear).
 
 **Change summary:**
 
@@ -1485,5 +1486,4 @@ Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `
 
 **What I'd do next (with more time):**
 - **Seed a synchronous draw on resume** to erase the ~1-frame stale-frame artifact (verify it's even visible per-browser first).
-- **Anchor the popover to the control bar** (not the single button) so it provably never overlaps the PiP at sub-320px widths.
 - **A live per-preset thumbnail strip** (deliberately deferred as scope creep — a single self-view preview already shows the active grade).
