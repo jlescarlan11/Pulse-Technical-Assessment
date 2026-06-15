@@ -308,15 +308,7 @@ describe("VideoPanel aria-live presence announcements", () => {
   it("announces the stranger is back (sharing-honest) when a connected peer returns", () => {
     // Start away (after a connection existed), then return.
     const { rerender } = renderPanel({ peerAway: true, localAway: false });
-    rerender(
-      <VideoPanel
-        localStream={fakeStream}
-        remoteStream={fakeStream}
-        onEnd={() => {}}
-        peerAway={false}
-        localAway={false}
-      />,
-    );
+    rerender(panel({ peerAway: false, localAway: false }));
     expect(
       within(liveRegion()).getByText(/Stranger is back\. Your video is shared again/),
     ).toBeInTheDocument();
