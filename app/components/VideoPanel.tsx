@@ -77,6 +77,11 @@ const COPY = {
   cameraOnLabel: "Turn on camera",
   peerMutedBadge: "Muted",
   peerCameraOffBadge: "Camera off",
+
+  // Phase 5 — local PiP badge when YOU turn your own camera off. The self-view
+  // stays live (you still see yourself), but the peer receives black. Honest:
+  // states that this view is only yours, never claims to stop recording.
+  notSharedCameraOff: "Off · only you see this",
 } as const;
 
 type VideoPanelProps = {
@@ -227,9 +232,11 @@ export default function VideoPanel({
   // initial peerAway=true never flashes the overlay before the first frame.
   const showPeerAwayOverlay = hasConnected && peerAway && peerHasBeenPresent;
 
-  // Outgoing clone held: same condition as before. The self-view stays live —
-  // this only drives the non-blocking "not shared" badge over the PiP.
-  const outgoingHeld = localAway || peerAway;
+  // Outgoing clone held: the self-view stays live — this only drives the
+  // non-blocking "not shared" badge over the PiP. Phase 5: a manual camera-off
+  // also holds the outgoing feed (the user turned it off on purpose), so the
+  // PiP must explain that they still see themselves but the peer does not.
+  const outgoingHeld = localAway || peerAway || !isCameraOn;
 
   // BUG-2: the badge must only blame the stranger once they have actually been
   // seen present — the same peerHasBeenPresent latch the full-screen overlay
@@ -275,16 +282,20 @@ export default function VideoPanel({
     [],
   );
 
-  // FIX 1 — the PiP badge is now a SINGLE compact pill: a short, one-line label
-  // chosen by the same attribution the matrix above describes. localAway wins
-  // (it's your own tab); then the peer-attributed default once they've been
+  // FIX 1 — the PiP badge is a SINGLE compact pill: a short, one-line label
+  // chosen by the attribution the matrix above describes. Phase 5: a deliberate
+  // camera-off wins over everything (it's the user's own explicit action), then
+  // localAway (your own tab), then the peer-attributed default once they've been
   // present; otherwise the neutral pre-heartbeat connecting label. No wrapping
   // sub-line — the full-screen overlay already conveys the "why".
-  const notSharedPillLabel = localAway
-    ? COPY.notSharedLocalAway
-    : heldByPeer
-      ? COPY.notSharedLabel
-      : COPY.notSharedConnecting;
+  const cameraManuallyOff = !isCameraOn;
+  const notSharedPillLabel = cameraManuallyOff
+    ? COPY.notSharedCameraOff
+    : localAway
+      ? COPY.notSharedLocalAway
+      : heldByPeer
+        ? COPY.notSharedLabel
+        : COPY.notSharedConnecting;
 
   return (
     <div
@@ -377,15 +388,15 @@ export default function VideoPanel({
           </div>
         )}
 
-        {/* Phase 5 — peer's mute/camera badges. Compact pill overlays in the
-            top-left (mute badge) and top-right (camera badge) of the remote
-            video area. These sit OUTSIDE the auto-calm region so they're always
-            visible without needing controls to be up. Icon + label, same honest
-            framing as local badges. */}
-        {remoteStream && (
-          <>
+        {/* Phase 5 — peer's mute/camera badges. Stacked in the TOP-RIGHT corner
+            so they never collide with the top-left "Live"/"Away" presence pill.
+            They sit OUTSIDE the auto-calm region so they stay visible without
+            needing the controls up. Icon + label, same honest framing as the
+            local badges. */}
+        {remoteStream && (peerMuted || !peerCameraOn) && (
+          <div className="pointer-events-none absolute right-4 top-4 flex flex-col items-end gap-2">
             {peerMuted && (
-              <div className="pointer-events-none absolute left-4 top-4 flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
+              <div className="flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
                 <svg
                   className="h-3.5 w-3.5 shrink-0 text-haze-100"
                   viewBox="0 0 24 24"
@@ -410,7 +421,7 @@ export default function VideoPanel({
               </div>
             )}
             {!peerCameraOn && (
-              <div className="pointer-events-none absolute right-4 top-4 flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
+              <div className="flex items-center gap-1.5 rounded-full glass-faint px-3 py-1.5">
                 <svg
                   className="h-3.5 w-3.5 shrink-0 text-haze-100"
                   viewBox="0 0 24 24"
@@ -431,7 +442,7 @@ export default function VideoPanel({
                 </span>
               </div>
             )}
-          </>
+          </div>
         )}
 
         {/* Top scrim + presence indicator (auto-calms with controls).
@@ -489,17 +500,36 @@ export default function VideoPanel({
                  and has no motion of its own, so it is reduced-motion safe. */
               <div className="pointer-events-none absolute inset-x-0 bottom-0 flex justify-start bg-gradient-to-t from-ink-950/85 via-ink-950/45 to-transparent px-2 pb-2 pt-6">
                 <span className="flex max-w-full items-center gap-1.5 rounded-full bg-ink-950/70 px-2 py-0.5 backdrop-blur">
-                  {/* Slashed "send" (paper-plane) glyph: marks "not being sent",
-                      honest — no eye/gaze imagery. */}
-                  <svg
-                    className="h-3 w-3 shrink-0 text-haze-100"
-                    viewBox="0 0 24 24"
-                    fill="none"
-                    aria-hidden
-                  >
-                    <path d="M4 12l15-7-4 15-3.5-5L4 12z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-                    <path d="M4 4l16 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                  </svg>
+                  {cameraManuallyOff ? (
+                    /* Slashed-camera glyph: YOU turned your camera off, so the
+                       peer sees black while this self-view stays live. */
+                    <svg
+                      className="h-3 w-3 shrink-0 text-haze-100"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      aria-hidden
+                    >
+                      <path d="M10.66 6H14a2 2 0 0 1 2 2v2.34l1 1L22 8v8" />
+                      <path d="M16 16a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h2l10 10z" />
+                      <line x1="2" y1="2" x2="22" y2="22" />
+                    </svg>
+                  ) : (
+                    /* Slashed "send" (paper-plane) glyph: marks "not being sent",
+                       honest — no eye/gaze imagery. */
+                    <svg
+                      className="h-3 w-3 shrink-0 text-haze-100"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      aria-hidden
+                    >
+                      <path d="M4 12l15-7-4 15-3.5-5L4 12z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                      <path d="M4 4l16 16" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                    </svg>
+                  )}
                   <span className="truncate font-mono text-[10px] uppercase tracking-wider text-haze-100">
                     {notSharedPillLabel}
                   </span>
@@ -622,18 +652,26 @@ export default function VideoPanel({
           </span>
         </button>
 
-        {/* End video button (danger color) */}
+        {/* End video button (danger color). Icon-only, same 56px round target as
+            the mute/camera buttons — the old pill padding (px-7 py-3.5) squeezed
+            the glyph out of the circle, so it's removed here. */}
         <button
           onClick={onEnd}
-          className="flex h-14 w-14 items-center justify-center rounded-full bg-danger px-7 py-3.5 font-semibold text-white shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-danger-400 active:scale-95"
+          className="group relative flex h-14 w-14 items-center justify-center rounded-full bg-danger text-white shadow-float transition duration-300 ease-[var(--ease-spring)] hover:scale-[1.03] hover:bg-danger-400 active:scale-95"
           aria-label="End video call"
+          title="End video call"
         >
-          <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" aria-hidden>
+          {/* Hang-up handset (rotated 135°) — the universal end-call glyph. */}
+          <svg className="h-[26px] w-[26px]" viewBox="0 0 24 24" fill="currentColor" aria-hidden>
             <path
-              d="M5 11c4.5-3 9.5-3 14 0v3l-3.5.6-.5-2.4c-2-.8-4-.8-6 0l-.5 2.4L5 14z"
-              fill="currentColor"
+              transform="rotate(135 12 12)"
+              d="M20.01 15.38c-1.23 0-2.42-.2-3.53-.56a.977.977 0 0 0-1.01.24l-1.57 1.97c-2.83-1.35-5.48-3.9-6.89-6.83l1.95-1.66c.27-.28.35-.67.24-1.02-.37-1.11-.56-2.3-.56-3.53 0-.54-.45-.99-.99-.99H4.19C3.65 2.99 3 3.24 3 3.99 3 13.28 10.73 21 20.01 21c.71 0 .99-.63.99-1.18v-3.45c0-.54-.45-.99-.99-.99z"
             />
           </svg>
+          {/* Hover label tooltip */}
+          <span className="pointer-events-none absolute -top-10 whitespace-nowrap rounded-full bg-ink-800/90 px-2 py-1 text-[11px] font-semibold text-haze-100 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+            End
+          </span>
         </button>
       </div>
     </div>
