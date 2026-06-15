@@ -1446,3 +1446,44 @@ Ran the full subagent pipeline: `project-manager` → `stakeholder` (gate) → `
 - **A subtle label** ("You found each other near [place name]") using Mapbox reverse geocoding on the midpoint — the honest version of naming the moment without over-claiming exact location.
 - **Smooth peer-dot entrance:** when the filter switches from all-peers to just the active peer, a CSS fade-out on departing markers would make the "others disappear" feel intentional rather than abrupt.
 - **Reset camera position on teardown** to re-center on the user's own dot after a session ends, so the map doesn't stay zoomed in on a previous connection's location.
+
+# Phase 4: Camera Filters — Cosmetic Color-Grade on the Transmit Path
+
+**The brief:** "Add a filter to our camera, like TikTok/Instagram/Messenger." Scoped — with PM + stakeholder review *before* any code — to **Tier 2**: a small fixed set of cosmetic color-grade presets (**None / Night / Warm / Mono**) applied to the video the peer actually receives. Explicitly **out of scope**: face detection, AR masks, beauty filters, ML, virtual backgrounds (Tier 3 — a different product personality and a real mobile/battery cost that doesn't fit a lean, honest app).
+
+**Why it fits "Signal in the Dark":** a color grade is a *mood* control, not a costume. Night/Mono read as consonant with the dark, restrained aesthetic. It's also a "reduce what I broadcast" lever, which is on-theme for an app whose levers mostly reduce rather than amplify.
+
+**The one structural idea — a canvas stage in the existing clone-and-gate seam:** `startVideo()` already transmits a *clone* of the camera track, gated on/off via `.enabled` by the presence shield. A filter inserts a canvas between the camera and the transmitted track: hidden `<video>` (fed the original camera) → per-frame `ctx.filter` draw → `canvas.captureStream(24fps)` track → swapped into the sender via `replaceTrack` (no renegotiation). Switching between two grades only changes the css string; only None↔grade swaps the track.
+
+**The non-negotiable invariant (stakeholder condition #1): the filter is cosmetic; the `.enabled` gate is the *sole* privacy authority.** The canvas/rAF loop pauses in a backgrounded tab — so it can never be trusted to stop frames. The defense: the swapped-in canvas track is **born at the current gate state** (`next.enabled = outgoingVideoEnabled` *before* `replaceTrack`), and JS's single-threaded model means the 2 s presence heartbeat can never interleave inside a swap. A filtered call is therefore *exactly* as fail-closed as an unfiltered one. The security audit traced every path (swap, concurrent-gate, born-gated, fallback) and found **no way for a clear un-gated frame to escape** — Critical/High/Medium: none.
+
+**Honesty, two ways:**
+- **None-bypass (stakeholder condition #2 — zero cost at rest):** at None (the default, the common case) the raw clone is sent exactly as before — no canvas, no rAF, no per-frame draw. The pipeline only exists while a grade is active.
+- **Honest fallback (condition #3):** if the browser can't build the canvas pipeline (`captureStream`/`ctx.filter` unavailable), `setFilter()` returns the preset *actually in effect* — `"none"` — and the UI binds to that return value. The picker and self-view never claim a grade the peer isn't receiving, and a screen reader hears *"Filter unavailable — sending unfiltered video."*
+- **Self-view parity:** the local self-view paints the *same* `css` string from the single source of truth (`lib/videoFilters.ts`), so preview and transmit can't drift — you see what you send.
+
+**Accessibility:** the four mutually-exclusive presets are a true **radio group** (`role="radiogroup"`/`radio` + `aria-checked`, roving tabindex, arrow-key roving), not toggle buttons. Opening the picker moves focus to the checked option; Escape / outside-click / committed pick close it and return focus to the toggle; arrow-roving previews *without* closing. Active-vs-open are separate signals (a ring + filled-dot badge marks an active grade — shape, not just color).
+
+**What QA / review caught and we fixed before merge:**
+- **Zero-dimension camera (Major):** `getSettings()` can report `width:0` transiently on some drivers/virtual cameras; `?? 640` *kept* the 0 → a 0×0 canvas → black feed. Fixed to truthy `|| 640`/`|| 480` with a regression test.
+- **Night was too strong:** `hue-rotate(200deg)` turned skin cyan/alien — a costume. Retuned to a humane 18° cool tint (coolness mostly from reduced warm saturation + dim/contrast).
+- The UI/UX pass added the close/focus lifecycle, SR announcements, and the active-state marker described above.
+
+**Known minor (documented, not blocking):** on resume from a backgrounded tab the canvas may hold one stale *own-face* filtered frame for ~1 frame (~40 ms) before the rAF loop ticks — bounded, not a privacy leak (it's your own face, and an *absent peer's* feed can never appear). The small-screen popover can visually overlap the PiP at ~320px (it stays usable via `z-50`).
+
+**Change summary:**
+
+| Area | Change | Thinking |
+|------|--------|----------|
+| `lib/videoFilters.ts` (new) | The 4 presets as `{id,label,css}`, `getFilterPreset()` (unknown→none), `DEFAULT_FILTER_ID` | Single source of truth so transmit + self-view can't drift |
+| `lib/webrtc.ts` | `setFilter()`, `swapSentTrack()` (born-gated), `buildFilterPipeline()`/`teardownFilterPipeline()`, stored `outgoingVideoEnabled` gate mirror, cleanup in `stopVideo()` | Canvas stage + the privacy invariant; None-bypass; honest fallback |
+| `app/page.tsx` | `selectedFilter` state, `selectFilter()` (binds to `setFilter`'s effective return), `teardown()` reset, VideoPanel wiring | Honest-state binding; per-call reset (no persistence) |
+| `app/components/VideoPanel.tsx` | Radiogroup picker, self-view CSS grade, SR announcements, Escape/outside-click/focus loop, active-vs-open marker | The UI half (Stories 2 + 3) |
+
+**Total:** Cosmetic camera filters built entirely in the existing clone-and-gate seam — **no media server, no API route, no schema change, no signaling change.** P2P and client-only. Suite **469 → 531** (62 new tests, including the privacy-invariant and a11y coverage). `tsc` clean, lint clean.
+**Risk:** Low — the privacy gate is unchanged and independently re-proven; None pays nothing; every failure path lands on the gated raw clone.
+
+**What I'd do next (with more time):**
+- **Seed a synchronous draw on resume** to erase the ~1-frame stale-frame artifact (verify it's even visible per-browser first).
+- **Anchor the popover to the control bar** (not the single button) so it provably never overlaps the PiP at sub-320px widths.
+- **A live per-preset thumbnail strip** (deliberately deferred as scope creep — a single self-view preview already shows the active grade).
