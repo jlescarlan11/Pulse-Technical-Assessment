@@ -379,3 +379,94 @@ describe("Phase 5 — mute & camera controls", () => {
     expect(screen.queryByText("You")).not.toBeInTheDocument();
   });
 });
+
+describe("VideoPanel camera-filter picker — audit fixes", () => {
+  function liveRegion() {
+    return screen.getByRole("status");
+  }
+
+  it("S4: marks an active non-none filter distinctly from the open state (ring + named label)", () => {
+    renderPanel({ selectedFilter: "warm" });
+    // The toggle's accessible name names the active grade — legible to SR users
+    // separately from aria-expanded (open/closed).
+    const toggle = screen.getByRole("button", { name: /Camera filter \(Warm active\)/ });
+    expect(toggle).toHaveAttribute("aria-expanded", "false");
+    expect(toggle.className).toContain("ring-signal");
+  });
+
+  it("S4: a 'none' filter shows neither the active ring nor an active label", () => {
+    renderPanel({ selectedFilter: "none" });
+    const toggle = screen.getByRole("button", { name: "Camera filter" });
+    expect(toggle.className).not.toContain("ring-signal");
+  });
+
+  it("B2: opening the picker moves focus to the checked radio option", () => {
+    renderPanel({ selectedFilter: "warm" });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    const checked = screen.getByRole("radio", { name: /WARM/ });
+    expect(checked).toHaveFocus();
+  });
+
+  it("B1: Escape closes the picker and returns focus to the toggle", () => {
+    renderPanel({ selectedFilter: "none" });
+    const toggle = screen.getByRole("button", { name: /Camera filter/ });
+    fireEvent.click(toggle);
+    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+    expect(toggle).toHaveFocus();
+  });
+
+  it("B1: a pointerdown outside the picker dismisses it", () => {
+    renderPanel({ selectedFilter: "none" });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
+    fireEvent.pointerDown(document.body);
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  });
+
+  it("S1: committing a pick (click) applies it AND closes the picker", () => {
+    const onSelectFilter = jest.fn();
+    renderPanel({ selectedFilter: "none", onSelectFilter });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /MONO/ }));
+    expect(onSelectFilter).toHaveBeenCalledWith("mono");
+    expect(screen.queryByRole("radiogroup")).not.toBeInTheDocument();
+  });
+
+  it("S1: arrow-roving previews WITHOUT closing the picker", () => {
+    const onSelectFilter = jest.fn();
+    renderPanel({ selectedFilter: "none", onSelectFilter });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    const none = screen.getByRole("radio", { name: /NONE/ });
+    fireEvent.keyDown(none, { key: "ArrowDown" });
+    // Preview applied, but the picker stays open for further roaming.
+    expect(onSelectFilter).toHaveBeenCalledWith("night");
+    expect(screen.getByRole("radiogroup")).toBeInTheDocument();
+  });
+
+  it("S3: announces the effective filter by name when it changes", () => {
+    const { rerender } = renderPanel({ selectedFilter: "none" });
+    rerender(panel({ selectedFilter: "warm" }));
+    expect(within(liveRegion()).getByText("Camera filter: Warm")).toBeInTheDocument();
+  });
+
+  it("S3: announces the honest fallback when a requested grade comes back 'none'", () => {
+    // Request "night" via the picker, but the parent's effective selectedFilter
+    // stays "none" (canvas pipeline unavailable) — the announcer must say the
+    // feed is unfiltered rather than imply the grade applied.
+    let last: string | null = null;
+    const onSelectFilter = jest.fn((id: string) => {
+      last = id;
+    });
+    const { rerender } = renderPanel({ selectedFilter: "none", onSelectFilter });
+    fireEvent.click(screen.getByRole("button", { name: /Camera filter/ }));
+    fireEvent.click(screen.getByRole("radio", { name: /NIGHT/ }));
+    expect(last).toBe("night");
+    // Parent reports the fallback: effective filter remains "none".
+    rerender(panel({ selectedFilter: "none", onSelectFilter }));
+    expect(
+      within(liveRegion()).getByText("Filter unavailable — sending unfiltered video."),
+    ).toBeInTheDocument();
+  });
+});

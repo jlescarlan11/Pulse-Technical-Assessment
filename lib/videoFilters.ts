@@ -38,12 +38,15 @@ export const FILTER_PRESETS: readonly FilterPreset[] = [
   // Passthrough. Empty css => the webrtc transmit path skips the canvas stage
   // entirely (zero cost at rest). Always first.
   { id: "none", label: "NONE", css: "" },
-  // "Night": cooler, dimmer, higher-contrast — leans into the dark theme. A
-  // gentle hue-rotate pushes skin/scene toward blue without going sci-fi.
+  // "Night": cooler, dimmer, higher-contrast — leans into the dark theme. The
+  // coolness now comes mostly from pulling WARM saturation down a touch plus a
+  // dim/contrast lift; the hue-rotate is a gentle 18° nudge toward blue. The old
+  // 200deg swing turned skin tones cyan/alien — a costume, not a mood — so it's
+  // retuned to a subtle cool tint that keeps faces human.
   {
     id: "night",
     label: "NIGHT",
-    css: "brightness(0.85) contrast(1.15) saturate(0.85) hue-rotate(200deg)",
+    css: "brightness(0.9) contrast(1.12) saturate(0.8) hue-rotate(18deg)",
   },
   // "Warm": a soft, candle-lit sepia wash with a touch more brightness — cozy
   // against the dark UI without blowing out highlights.
