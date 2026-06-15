@@ -329,6 +329,38 @@ Append-only log of architectural decisions, technological choices, and design tr
 
 ---
 
+## page.tsx Decomposition Refactor (2026-06-15)
+
+Behavior-preserving decomposition of the 1192-line `Home` god component into
+custom hooks + pure reducers (branch `refactor/page-decomposition`, 8 commits).
+Final: page.tsx 1192 → 841 lines; 8 new modules, each with co-located tests
+(323 total, all green; CI lint/tsc/test/build green).
+
+Decisions made and held:
+- **R-0 characterization test required before R-4/R-5 merge.** page.tsx had ZERO
+  tests, so "behavior-preserving" had no baseline. A focused integration net
+  (`app/page.characterization.test.tsx`) pins the connection lifecycle + the
+  privacy-critical reciprocal-video gate against the CURRENT behavior. It must
+  keep passing through any future page.tsx change.
+- **`startPeer` stays resident in page.tsx (R-6 rejected).** It's the seam where
+  chat/connection/video converge and touches the privacy-critical track gating;
+  relocating the `PeerSession` constructor was judged higher-risk than the
+  marginal tidiness. Hooks supply handler bodies; the orchestrator holds the seam.
+- **Single shared `peerRef` is a hard constraint.** Both reducers are state-only
+  and pure; `peerRef` is one `useRef` in page.tsx passed by reference into the
+  hooks. Do not move it into a hook or duplicate it.
+- **No behavior changes in flight.** BUG-1 (manual mute/camera state is reset
+  only on full teardown, NOT on `video-end`/`endVideo`, so it can carry into a
+  second video call within the same chat) was found by QA and confirmed
+  **pre-existing on `main`** — faithfully preserved, deliberately NOT fixed here.
+  It is a separate story if we choose to address it.
+
+## Out of Scope (separate efforts)
+
+- **Per-poll global DB reaping** (`app/api/poll/route.ts`): every client runs
+  three global `deleteMany` sweeps every poll tick — O(N) writes for O(1) useful
+  work. Move to a scheduled job (Vercel Cron). Unrelated to the page decomposition.
+
 ## Future Decision Points
 
 1. **Phase 3 (Security):** Rate limiting and input validation strategy
